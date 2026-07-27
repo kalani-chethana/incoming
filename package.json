@@ -1,0 +1,15 @@
+{
+  "name": "forgelens",
+  "private": true,
+  "version": "1.0.0",
+  "packageManager": "bun@1.3.14",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "bun run --workspaces --parallel dev",
+    "build": "bun run --workspaces --sequential build",
+    "typecheck": "bun run --workspaces --sequential typecheck"
+  }
+}
