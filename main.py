@@ -12,6 +12,7 @@ import numpy as np
 PREFERRED_CAMERA_ID = 0
 CAMERA_IDS_TO_TRY = range(4)
 MINIMUM_CONFIDENCE = 0.30
+MINIMUM_SERIAL_LENGTH = 7
 WINDOW_NAME = "Metal Serial Number Reader"
 PROJECT_DIRECTORY = Path(__file__).resolve().parent
 DETECTION_MODEL = (
@@ -69,7 +70,7 @@ def read_serial_number(
     image: np.ndarray,
     minimum_confidence: float = MINIMUM_CONFIDENCE,
 ) -> tuple[str, float, str, np.ndarray]:
-    """Read every image variant and return the highest-confidence digit sequence."""
+    """Read every image variant and return the best valid serial-number row."""
     processed_images = preprocess_image(image)
     best_number = ""
     best_confidence = 0.0
@@ -95,31 +96,62 @@ def read_serial_number(
                 continue
             results.append((box, detected_text, confidence))
 
-        def left_coordinate(result: tuple[Any, str, float]) -> float:
+        def box_coordinates(result: tuple[Any, str, float]) -> tuple[float, float, float]:
             try:
-                return float(result[0][0][0])
+                points = result[0]
+                x_values = [float(point[0]) for point in points]
+                y_values = [float(point[1]) for point in points]
+                return (
+                    min(x_values),
+                    (min(y_values) + max(y_values)) / 2,
+                    max(max(y_values) - min(y_values), 1.0),
+                )
             except (IndexError, TypeError, ValueError):
-                return 0.0
+                return (0.0, 0.0, 1.0)
 
-        results.sort(key=left_coordinate)
-        number_parts: list[str] = []
-        confidence_values: list[float] = []
+        # Keep only digit-only OCR boxes. In particular, do not turn labels such
+        # as "25lb" into a false serial fragment by stripping their letters.
+        digit_results = [
+            result
+            for result in results
+            if result[2] >= minimum_confidence
+            and re.fullmatch(r"\s*[0-9]+(?:\s+[0-9]+)*\s*", result[1])
+        ]
+        digit_results.sort(key=lambda result: (box_coordinates(result)[1], box_coordinates(result)[0]))
 
-        for _, detected_text, confidence in results:
-            numeric_text = re.sub(r"[^0-9]", "", detected_text)
-            if numeric_text and confidence >= minimum_confidence:
-                number_parts.append(numeric_text)
-                confidence_values.append(float(confidence))
+        rows: list[list[tuple[Any, str, float]]] = []
+        for result in digit_results:
+            _, center_y, height = box_coordinates(result)
+            matching_row: list[tuple[Any, str, float]] | None = None
+            for row in rows:
+                row_centers = [box_coordinates(item)[1] for item in row]
+                row_heights = [box_coordinates(item)[2] for item in row]
+                row_center = sum(row_centers) / len(row_centers)
+                row_height = sum(row_heights) / len(row_heights)
+                if abs(center_y - row_center) <= 0.5 * max(height, row_height):
+                    matching_row = row
+                    break
+            if matching_row is None:
+                rows.append([result])
+            else:
+                matching_row.append(result)
 
-        if not number_parts:
-            continue
-        complete_number = "".join(number_parts)
-        average_confidence = sum(confidence_values) / len(confidence_values)
-        if average_confidence > best_confidence:
-            best_number = complete_number
-            best_confidence = average_confidence
-            best_variant = variant_name
-            best_image = processed_image
+        for row in rows:
+            row.sort(key=lambda result: box_coordinates(result)[0])
+            complete_number = "".join(
+                re.sub(r"\s", "", detected_text)
+                for _, detected_text, _ in row
+            )
+            if len(complete_number) < MINIMUM_SERIAL_LENGTH:
+                continue
+
+            confidence_values = [confidence for _, _, confidence in row]
+            average_confidence = sum(confidence_values) / len(confidence_values)
+            if average_confidence > best_confidence:
+                best_number = complete_number
+                best_confidence = average_confidence
+                best_variant = variant_name
+                best_image = processed_image
 
     return best_number, best_confidence, best_variant, best_image
 
