@@ -6,12 +6,11 @@ from datetime import datetime
 from io import BytesIO
 
 import cv2
-import easyocr
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-from main import read_serial_number
+from main import create_ocr_reader, read_serial_number
 
 
 st.set_page_config(
@@ -23,9 +22,9 @@ st.set_page_config(
 
 
 @st.cache_resource(show_spinner=False)
-def load_reader() -> easyocr.Reader:
+def load_reader():
     """Load the expensive OCR model once for all scans."""
-    return easyocr.Reader(["en"], gpu=False, verbose=False)
+    return create_ocr_reader()
 
 
 def decode_image(image_bytes: bytes) -> np.ndarray | None:
@@ -44,6 +43,7 @@ def initialize_state() -> None:
     defaults = {
         "scan_result": None,
         "scan_history": [],
+        "camera_generation": 0,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -79,8 +79,8 @@ with workspace:
         if source == "Camera":
             image_file = st.camera_input(
                 "Take a clear photo",
-                key="camera_capture",
-                help="Use the rear camera on a phone for the sharpest engraving detail.",
+                key=f"camera_capture_{st.session_state.camera_generation}",
+                help="Taking a photo automatically starts PaddleOCR.",
             )
         else:
             image_file = st.file_uploader(
@@ -105,16 +105,20 @@ with workspace:
                 help="Displays the contrast variant that produced the best result.",
             )
 
-        scan_clicked = st.button(
-            "Read serial number",
-            type="primary",
-            icon=":material/document_scanner:",
-            disabled=image_file is None,
-            width="stretch",
-        )
+        if source == "Camera":
+            scan_clicked = image_file is not None
+            st.caption(":material/info: Take photo automatically captures and reads.")
+        else:
+            scan_clicked = st.button(
+                "Read uploaded image",
+                type="primary",
+                icon=":material/document_scanner:",
+                disabled=image_file is None,
+                width="stretch",
+            )
 
-        if image_file is None:
-            st.caption(":material/info: Capture or upload an image to enable scanning.")
+        if source == "Upload" and image_file is None:
+            st.caption(":material/info: Upload an image to enable scanning.")
 
 with results:
     result_panel = st.container(border=True)
@@ -159,10 +163,14 @@ with results:
             st.metric("Serial number", "Not detected", border=True)
             st.metric("Confidence", "0%", border=True)
 
-if scan_clicked and image_file is not None:
-    image = decode_image(image_file.getvalue())
+if scan_clicked:
+    image = decode_image(image_file.getvalue()) if image_file is not None else None
+
     if image is None:
-        st.error("This image could not be decoded. Please choose another file.", icon=":material/error:")
+        st.error(
+            "This image could not be decoded. Please capture or choose another image.",
+            icon=":material/error:",
+        )
     else:
         with result_panel, st.status(
             "Reading the metal surface…",
@@ -202,6 +210,8 @@ if scan_clicked and image_file is not None:
                 st.toast(f"Detected {serial}", icon=":material/check_circle:")
             else:
                 scan_status.update(label="No serial detected", state="error", expanded=False)
+        if source == "Camera":
+            st.session_state.camera_generation += 1
         st.rerun()
 
 current_result = st.session_state.scan_result

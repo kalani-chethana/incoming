@@ -2,9 +2,10 @@
 
 import re
 import sys
+from pathlib import Path
+from typing import Any
 
 import cv2
-import easyocr
 import numpy as np
 
 
@@ -12,6 +13,32 @@ PREFERRED_CAMERA_ID = 0
 CAMERA_IDS_TO_TRY = range(4)
 MINIMUM_CONFIDENCE = 0.30
 WINDOW_NAME = "Metal Serial Number Reader"
+PROJECT_DIRECTORY = Path(__file__).resolve().parent
+DETECTION_MODEL = (
+    PROJECT_DIRECTORY / "models" / "paddleocr" / "en_PP-OCRv3_det_infer"
+)
+RECOGNITION_MODEL = (
+    PROJECT_DIRECTORY / "models" / "paddleocr" / "en_PP-OCRv3_rec_infer"
+)
+CLASSIFICATION_MODEL = (
+    PROJECT_DIRECTORY / "models" / "paddleocr" / "ch_ppocr_mobile_v2.0_cls_infer"
+)
+
+
+def create_ocr_reader() -> Any:
+    """Create PaddleOCR using project-local models with no runtime download."""
+    from paddleocr import PaddleOCR
+
+    return PaddleOCR(
+        lang="en",
+        use_angle_cls=False,
+        use_gpu=False,
+        enable_mkldnn=False,
+        show_log=False,
+        det_model_dir=str(DETECTION_MODEL),
+        rec_model_dir=str(RECOGNITION_MODEL),
+        cls_model_dir=str(CLASSIFICATION_MODEL),
+    )
 
 
 def preprocess_image(image: np.ndarray) -> list[tuple[str, np.ndarray]]:
@@ -38,7 +65,7 @@ def preprocess_image(image: np.ndarray) -> list[tuple[str, np.ndarray]]:
 
 
 def read_serial_number(
-    reader: easyocr.Reader,
+    reader: Any,
     image: np.ndarray,
     minimum_confidence: float = MINIMUM_CONFIDENCE,
 ) -> tuple[str, float, str, np.ndarray]:
@@ -49,13 +76,32 @@ def read_serial_number(
     best_variant, best_image = processed_images[0]
 
     for variant_name, processed_image in processed_images:
-        results = reader.readtext(
-            processed_image,
-            detail=1,
-            paragraph=False,
-            allowlist="0123456789",
+        raw_output: Any = reader.ocr(processed_image, cls=False)
+        raw_results: Any = (
+            raw_output[0]
+            if raw_output and raw_output[0] is not None
+            else []
         )
-        results.sort(key=lambda result: result[0][0][0])
+        results: list[tuple[Any, str, float]] = []
+        for raw_result in raw_results:
+            if not isinstance(raw_result, (list, tuple)) or len(raw_result) < 2:
+                continue
+            try:
+                box: Any = raw_result[0]
+                recognition: Any = raw_result[1]
+                detected_text = str(recognition[0])
+                confidence = float(recognition[1])
+            except (IndexError, TypeError, ValueError):
+                continue
+            results.append((box, detected_text, confidence))
+
+        def left_coordinate(result: tuple[Any, str, float]) -> float:
+            try:
+                return float(result[0][0][0])
+            except (IndexError, TypeError, ValueError):
+                return 0.0
+
+        results.sort(key=left_coordinate)
         number_parts: list[str] = []
         confidence_values: list[float] = []
 
@@ -121,8 +167,8 @@ def main() -> int:
         return 1
 
     print(f"Using camera {camera_id}")
-    print("Loading EasyOCR...")
-    reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+    print("Loading PaddleOCR...")
+    reader = create_ocr_reader()
 
     detected_serial = "Not captured"
     detected_confidence = 0.0
