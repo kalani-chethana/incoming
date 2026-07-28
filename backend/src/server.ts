@@ -37,12 +37,17 @@ app.post("/api/read-serial", upload.single("image"), async (request, response, n
       return;
     }
     const minimumConfidence = Number(request.query.minimum_confidence ?? 0.3);
+    const checkType = String(request.query.check_type ?? "serial");
+    if (!["serial", "part", "weight"].includes(checkType)) {
+      response.status(422).json({ detail: "check_type must be serial, part, or weight." });
+      return;
+    }
     if (minimumConfidence < 0.1 || minimumConfidence > 0.9) {
       response.status(422).json({ detail: "minimum_confidence must be between 0.10 and 0.90." });
       return;
     }
     const extension = request.file.mimetype.split("/")[1].replace("jpeg", "jpg");
-    response.json(await ocrClient.read(request.file.buffer, extension, minimumConfidence));
+    response.json(await ocrClient.read(request.file.buffer, extension, minimumConfidence, checkType));
   } catch (error) {
     next(error);
   }

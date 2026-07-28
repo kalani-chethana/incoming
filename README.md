@@ -95,7 +95,8 @@ data/session_reports/<id>.json   Full JSON report
 The MySQL `scan_sessions` table stores the selected range, total readings,
 total detected pieces, in-range count and numbers, duplicate count and numbers,
 out-of-range count and numbers, not-detected count, and the JSON report file
-location. `session_id` is a MySQL auto-increment number beginning at `1`.
+location. It also stores the expected part number and part-number
+match/mismatch counts. `session_id` is a MySQL auto-increment number beginning at `1`.
 The matching report file contains the session ID, summary, number
 lists, and complete timestamped reading list.
 

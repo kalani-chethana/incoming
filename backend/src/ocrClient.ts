@@ -55,7 +55,7 @@ class OcrClient {
     return this.worker;
   }
 
-  async read(image: Buffer, extension: string, minimumConfidence = 0.3): Promise<OcrResult> {
+  async read(image: Buffer, extension: string, minimumConfidence = 0.3, checkType = "serial"): Promise<OcrResult> {
     await mkdir(temporaryDirectory, { recursive: true });
     const requestId = randomUUID();
     const imagePath = path.join(temporaryDirectory, `${requestId}.${extension}`);
@@ -69,6 +69,7 @@ class OcrClient {
         id: requestId,
         image_path: imagePath,
         minimum_confidence: minimumConfidence,
+        check_type: checkType,
       })}\n`);
       return await result;
     } finally {
