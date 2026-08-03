@@ -106,8 +106,7 @@ function App() {
     setAttemptCount(0);
   }
 
-  async function captureAndRead() {
-    const image = await capturePhoto();
+  async function readImage(image) {
     if (!image || !currentStep) return;
     setIsReading(true);
     setSaveError("");
@@ -134,6 +133,16 @@ function App() {
     } finally {
       setIsReading(false);
     }
+  }
+
+  async function captureAndRead() {
+    await readImage(await capturePhoto());
+  }
+
+  async function uploadAndRead(event) {
+    const image = event.target.files?.[0];
+    event.target.value = "";
+    if (image) await readImage(image);
   }
 
   async function finishSession() {
@@ -259,6 +268,15 @@ function App() {
         <button className="primary-button" disabled={!configurationReady || finished || isReading || !cameraReady} onClick={captureAndRead}>
           <ScanIcon />{isReading ? "Reading…" : `Capture ${currentStep?.label || ""}`}
         </button>
+        <label className={`upload-button ${finished || isReading ? "disabled" : ""}`}>
+          <input
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            disabled={finished || isReading}
+            onChange={uploadAndRead}
+          />
+          Upload image for {currentStep?.label}
+        </label>
         <div className="detected-value"><span>Last detected {result?.type || "value"}</span><strong>{result ? result.value || "Not detected" : "—"}</strong></div>
         {result && !result.value && attemptCount > 0 && <p className="retry-message">
           Not detected. Adjust the item and capture again — {3 - attemptCount} chance{3 - attemptCount === 1 ? "" : "s"} remaining.

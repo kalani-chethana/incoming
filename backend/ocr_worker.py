@@ -34,12 +34,10 @@ def create_ocr_reader() -> Any:
 
 
 def preprocess_image(image: np.ndarray) -> list[tuple[str, np.ndarray]]:
-    """Create contrast variants so OCR can choose the clearest result."""
-    enlarged = cv2.resize(image, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+    """Create normal and glare-resistant variants for engraved metal text."""
+    enlarged = cv2.resize(image, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
     gray = cv2.cvtColor(enlarged, cv2.COLOR_BGR2GRAY)
     enhanced = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(gray)
-    soft = cv2.GaussianBlur(enhanced, (0, 0), 1.2)
-    sharpened = cv2.addWeighted(enhanced, 1.9, soft, -0.9, 0)
     blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
     binary = cv2.adaptiveThreshold(
         blurred,
@@ -49,13 +47,66 @@ def preprocess_image(image: np.ndarray) -> list[tuple[str, np.ndarray]]:
         31,
         5,
     )
-    return [
+    variants = [
         ("Original", enlarged),
         ("Enhanced", enhanced),
-        ("Sharpened", sharpened),
         ("Binary", binary),
-        ("Inverted", cv2.bitwise_not(binary)),
     ]
+
+    # Operators place the engraved area near the center. A tighter crop makes
+    # small text occupy more pixels and removes most of the empty background.
+    height, width = image.shape[:2]
+    center = image[
+        int(height * 0.16):int(height * 0.82),
+        int(width * 0.18):int(width * 0.82),
+    ]
+    if not center.size:
+        return variants
+
+    center_large = cv2.resize(
+        center, None, fx=4.0, fy=4.0, interpolation=cv2.INTER_CUBIC
+    )
+    center_gray = cv2.cvtColor(center_large, cv2.COLOR_BGR2GRAY)
+    center_enhanced = cv2.createCLAHE(
+        clipLimit=3.2, tileGridSize=(8, 8)
+    ).apply(center_gray)
+    center_soft = cv2.GaussianBlur(center_enhanced, (0, 0), 1.1)
+    center_sharp = cv2.addWeighted(
+        center_enhanced, 2.0, center_soft, -1.0, 0
+    )
+    center_binary = cv2.adaptiveThreshold(
+        center_sharp,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        6,
+    )
+
+    # Black-hat and top-hat isolate shallow grooves under uneven reflections:
+    # one favors dark edges and the other favors bright edges.
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (35, 9))
+    dark_grooves = cv2.morphologyEx(
+        center_sharp, cv2.MORPH_BLACKHAT, kernel
+    )
+    bright_grooves = cv2.morphologyEx(
+        center_sharp, cv2.MORPH_TOPHAT, kernel
+    )
+    dark_grooves = cv2.normalize(
+        dark_grooves, None, 0, 255, cv2.NORM_MINMAX
+    )
+    bright_grooves = cv2.normalize(
+        bright_grooves, None, 0, 255, cv2.NORM_MINMAX
+    )
+    variants.extend([
+        ("Center enhanced", center_enhanced),
+        ("Center sharpened", center_sharp),
+        ("Center binary", center_binary),
+        ("Center inverted", cv2.bitwise_not(center_binary)),
+        ("Dark grooves", cv2.bitwise_not(dark_grooves)),
+        ("Bright grooves", cv2.bitwise_not(bright_grooves)),
+    ])
+    return variants
 
 
 def _box_coordinates(result: tuple[Any, str, float]) -> tuple[float, float, float]:

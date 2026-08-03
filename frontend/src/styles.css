@@ -108,6 +108,10 @@ h1 { font-size: clamp(44px, 6vw, 76px); line-height: .98; letter-spacing: -.055e
 .primary-button:hover:not(:disabled) { background: #d1ff51; transform: translateY(-1px); }
 .primary-button:disabled { opacity: .35; cursor: not-allowed; }
 .primary-button svg { width: 18px; }
+.upload-button { display: flex; align-items: center; justify-content: center; width: 100%; height: 44px; margin-top: 9px; border: 1px dashed #aab8b1; border-radius: 9px; color: #53615b; background: #f8faf9; font-size: 11px; font-weight: 700; cursor: pointer; transition: border-color .2s, background .2s; }
+.upload-button:hover { border-color: #8fc819; background: #f5faeb; }
+.upload-button input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.upload-button.disabled { opacity: .4; cursor: not-allowed; }
 .detected-value { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 5px 16px; margin-top: 14px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 10px; background: #f8faf9; }
 .detected-value > span { color: var(--muted); font-size: 11px; font-weight: 600; }
 .detected-value > strong { color: #75807b; font: 500 22px "DM Mono", monospace; letter-spacing: .06em; }
