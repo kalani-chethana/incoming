@@ -1,19 +1,46 @@
 import { useEffect, useRef, useState } from "react";
 
-const CHECKS = [
+interface CheckItem {
+  id: "serial" | "part" | "weight";
+  label: string;
+}
+
+interface ReadingRow {
+  id: number;
+  time: string;
+  serial: string;
+  status: string;
+  part_number: string;
+  part_check: string;
+  weight: string;
+  weight_check: string;
+}
+
+interface ResultState {
+  type: string;
+  value: string | null;
+  attempt: number;
+  extraSummary?: string;
+}
+
+const CHECKS: CheckItem[] = [
   { id: "serial", label: "Serial number" },
   { id: "part", label: "Part number" },
   { id: "weight", label: "Weight number" },
 ];
 
 function ScanIcon() {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 12h10M8 9h8M9 15h6" /></svg>;
+  return (
+    <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 12h10M8 9h8M9 15h6" />
+    </svg>
+  );
 }
 
 function App() {
-  const videoRef = useRef(null);
-  const streamRef = useRef(null);
-  const [selected, setSelected] = useState({ serial: true, part: true, weight: true });
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [selected, setSelected] = useState<Record<string, boolean>>({ serial: true, part: true, weight: true });
   const [rangeStart, setRangeStart] = useState("");
   const [rangeEnd, setRangeEnd] = useState("");
   const [expectedPart, setExpectedPart] = useState("");
@@ -21,14 +48,14 @@ function App() {
   const [started, setStarted] = useState(false);
   const [stepIndex, setStepIndex] = useState(0);
   const [attemptCount, setAttemptCount] = useState(0);
-  const [piece, setPiece] = useState({});
-  const [result, setResult] = useState(null);
-  const [readings, setReadings] = useState([]);
+  const [piece, setPiece] = useState<Record<string, string>>({});
+  const [result, setResult] = useState<ResultState | null>(null);
+  const [readings, setReadings] = useState<ReadingRow[]>([]);
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraError, setCameraError] = useState("");
   const [isReading, setIsReading] = useState(false);
   const [finished, setFinished] = useState(false);
-  const [savedSession, setSavedSession] = useState(null);
+  const [savedSession, setSavedSession] = useState<{ session_id: string } | null>(null);
   const [saveError, setSaveError] = useState("");
   const [autoCapture, setAutoCapture] = useState(true);
   const [captureFlash, setCaptureFlash] = useState(false);
@@ -81,10 +108,10 @@ function App() {
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
     }).catch((error) => {
-      const messages = {
-        NotAllowedError: "Camera permission is blocked in Edge.",
-        NotFoundError: "No camera was found.",
-        NotReadableError: "The camera is being used by another application.",
+      const messages: Record<string, string> = {
+        NotAllowedError: "Camera permission is blocked in browser settings.",
+        NotFoundError: "No camera device was detected.",
+        NotReadableError: "The camera is currently used by another application.",
       };
       setCameraError(messages[error.name] || "The camera could not be started.");
     });
@@ -95,27 +122,27 @@ function App() {
     };
   }, [started, configurationReady, finished]);
 
-  function normalize(value) {
+  function normalize(value: string) {
     return value.trim().toUpperCase().replace(/[_–—\s]+/g, "-");
   }
 
-  function normalizeWeight(value) {
+  function normalizeWeight(value: string) {
     return value.trim().toUpperCase().replace(/\s+/g, "");
   }
 
-  function capturePhoto() {
+  function capturePhoto(): Promise<File | null> {
     const video = videoRef.current;
     if (!video?.videoWidth) return Promise.resolve(null);
     const canvas = document.createElement("canvas");
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-    canvas.getContext("2d").drawImage(video, 0, 0);
+    canvas.getContext("2d")?.drawImage(video, 0, 0);
     return new Promise((resolve) => canvas.toBlob((blob) => resolve(
       blob ? new File([blob], "capture.jpg", { type: "image/jpeg" }) : null
-    ), "image/jpeg", .95));
+    ), "image/jpeg", 0.95));
   }
 
-  function finishPiece(values) {
+  function finishPiece(values: Record<string, string>) {
     const serial = values.serial || "Not detected";
     let status = selected.serial ? "Not detected" : "Not checked";
     if (values.serial) {
@@ -129,7 +156,7 @@ function App() {
     const partMatched = normalize(values.part || "") === normalize(expectedPart) ||
       (Boolean(partExpectedDigits) && partActualDigits === partExpectedDigits);
 
-    const row = {
+    const row: ReadingRow = {
       id: Date.now(), time: new Date().toLocaleTimeString(), serial, status,
       part_number: values.part || (selected.part ? "Not detected" : "Not checked"),
       part_check: !selected.part ? "Not checked" : !values.part ? "Not detected" : partMatched ? "Matched" : "Mismatched",
@@ -142,7 +169,7 @@ function App() {
     setAttemptCount(0);
   }
 
-  async function parseJsonResponse(response, defaultError) {
+  async function parseJsonResponse(response: Response, defaultError: string) {
     const text = await response.text();
     let payload = null;
     try {
@@ -157,7 +184,7 @@ function App() {
     return payload || {};
   }
 
-  async function readImage(image, isAuto = false) {
+  async function readImage(image: File | null, isAuto = false) {
     if (!image || !currentStep) return;
     setIsReading(true);
     setSaveError("");
@@ -284,8 +311,8 @@ function App() {
           error instanceof TypeError
             ? "Cannot reach the OCR server. Please check backend connection."
             : error instanceof Error
-            ? error.message
-            : "An unexpected error occurred."
+              ? error.message
+              : "An unexpected error occurred."
         );
       }
     } finally {
@@ -297,7 +324,7 @@ function App() {
     await readImage(await capturePhoto(), false);
   }
 
-  async function uploadAndRead(event) {
+  async function uploadAndRead(event: React.ChangeEvent<HTMLInputElement>) {
     const image = event.target.files?.[0];
     event.target.value = "";
     if (image) await readImage(image, false);
@@ -326,9 +353,11 @@ function App() {
     setSaveError("");
     try {
       const response = await fetch("/api/sessions", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          range_start: rangeStart || "0", range_end: rangeEnd || "0",
+          range_start: rangeStart || "0",
+          range_end: rangeEnd || "0",
           expected_part_number: expectedPart,
           selected_checks: steps.map((step) => step.id),
           expected_weight: expectedWeight,
@@ -336,197 +365,564 @@ function App() {
         }),
       });
       const payload = await parseJsonResponse(response, "Session could not be saved");
-      setSavedSession(payload); setFinished(true);
+      setSavedSession(payload);
+      setFinished(true);
     } catch (error) {
       setSaveError(
         error instanceof TypeError
           ? "Cannot reach the database server. Please check backend connection."
-          : error.message || "Session could not be saved."
+          : error instanceof Error
+            ? error.message
+            : "Session could not be saved."
       );
     }
   }
 
   async function downloadReport() {
+    if (!savedSession) return;
     const response = await fetch(`/api/sessions/${savedSession.session_id}/report.csv`);
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement("a");
-    link.href = url; link.download = `forgelens-session-${savedSession.session_id}.csv`; link.click();
+    link.href = url;
+    link.download = `forgelens-session-${savedSession.session_id}.csv`;
+    link.click();
     URL.revokeObjectURL(url);
   }
 
   function reset() {
-    setFinished(false); setSavedSession(null); setReadings([]); setResult(null);
-    setPiece({}); setStepIndex(0); setRangeStart(""); setRangeEnd("");
-    setAttemptCount(0); setCaptureFlash(false);
+    setFinished(false);
+    setSavedSession(null);
+    setReadings([]);
+    setResult(null);
+    setPiece({});
+    setStepIndex(0);
+    setRangeStart("");
+    setRangeEnd("");
+    setAttemptCount(0);
+    setCaptureFlash(false);
     cooldownRef.current = 0;
-    setExpectedPart(""); setExpectedWeight("");
-    setCameraReady(false); setCameraError("");
+    setExpectedPart("");
+    setExpectedWeight("");
+    setCameraReady(false);
+    setCameraError("");
     setStarted(false);
   }
 
-  return <main className="shell">
-    {started && <section className="inspection-overview">
-      <div className="overview-values">
-        {selected.serial && <div><span>Serial range</span><strong>{rangeStart} – {rangeEnd}</strong></div>}
-        {selected.part && <div><span>Part number</span><strong>{expectedPart}</strong></div>}
-        {selected.weight && <div><span>Weight</span><strong>{expectedWeight}</strong></div>}
-      </div>
-      <div className="flow-steps">
-        {steps.map((step, index) => {
-          const completed = Object.prototype.hasOwnProperty.call(piece, step.id);
-          const active = index === stepIndex && !finished;
-          return <div className={`flow-step ${active ? "active" : ""} ${completed ? "complete" : ""}`} key={step.id}>
-            <span>{completed ? "✓" : index + 1}</span><strong>{step.label}</strong>
-          </div>;
-        })}
-      </div>
-    </section>}
-    <section className={`workspace ${!started ? "setup-workspace" : ""}`}>
-      <div className="panel capture-panel">
-        {!started && <div className="operator-setup">
-          <div className="operator-heading"><span>1</span><div><h2>Set up inspection</h2><p>Select checks and enter the required values.</p></div></div>
-          <div className="operator-rows">
-            <div className={`operator-row ${selected.serial ? "selected" : ""}`}>
-              <label className="operator-check"><input type="checkbox" checked={selected.serial} onChange={(e) => setSelected({ ...selected, serial: e.target.checked })} /><span>Serial number</span></label>
-              <div className="operator-inputs">{selected.serial ? <><label><span>Range start</span><input inputMode="numeric" value={rangeStart} onChange={(e) => setRangeStart(e.target.value.replace(/\D/g, ""))} placeholder="7700000" /></label><label><span>Range end</span><input inputMode="numeric" value={rangeEnd} onChange={(e) => setRangeEnd(e.target.value.replace(/\D/g, ""))} placeholder="7799999" /></label></> : <span className="select-hint">Tick to add serial range</span>}</div>
+  return (
+    <main className="min-h-screen font-sans text-slate-900 pb-16">
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 pt-6 sm:pt-8">
+        {/* Modern Brand Topbar */}
+        <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-6 border-b border-slate-200/80 mb-6">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-2xl bg-lime-500 flex items-center justify-center shadow-md shadow-lime-500/25 text-slate-950 font-black text-xl tracking-tight">
+              F
             </div>
-            <div className={`operator-row ${selected.part ? "selected" : ""}`}>
-              <label className="operator-check"><input type="checkbox" checked={selected.part} onChange={(e) => setSelected({ ...selected, part: e.target.checked })} /><span>Part number</span></label>
-              <div className="operator-inputs">{selected.part ? <label><span>Expected part number</span><input value={expectedPart} onChange={(e) => setExpectedPart(e.target.value)} placeholder="07-1076 05" /></label> : <span className="select-hint">Tick to add part number</span>}</div>
-            </div>
-            <div className={`operator-row ${selected.weight ? "selected" : ""}`}>
-              <label className="operator-check"><input type="checkbox" checked={selected.weight} onChange={(e) => setSelected({ ...selected, weight: e.target.checked })} /><span>Weight number</span></label>
-              <div className="operator-inputs">{selected.weight ? <label><span>Expected weight</span><input value={expectedWeight} onChange={(e) => setExpectedWeight(e.target.value)} placeholder="25lb" /></label> : <span className="select-hint">Tick to add weight</span>}</div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900">ForgeLens</h1>
+                <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-slate-900 text-lime-400 rounded-md">
+                  Station 01
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 font-medium">Precision Industrial OCR & Part Verification</p>
             </div>
           </div>
-          <button className="primary-button" disabled={!configurationReady} onClick={() => { setStarted(true); setCameraReady(false); setCameraError(""); }}>Start inspection</button>
-        </div>}
-        <h2 className="legacy-setup">1. Select checks</h2>
-        <div className="check-selector legacy-setup">
-          {CHECKS.map((check) => <label key={check.id}>
-            <input type="checkbox" checked={selected[check.id]} disabled={readings.length > 0 || Object.keys(piece).length > 0}
-              onChange={(event) => { setSelected({ ...selected, [check.id]: event.target.checked }); setStepIndex(0); }} />
-            <span>{check.label}</span>
-          </label>)}
-        </div>
-        <div className="serial-range legacy-setup">
-          {selected.serial && <><label><span>Start serial number</span><input inputMode="numeric" value={rangeStart} onChange={(e) => setRangeStart(e.target.value.replace(/\D/g, ""))} placeholder="7700000" /></label>
-          <label><span>End serial number</span><input inputMode="numeric" value={rangeEnd} onChange={(e) => setRangeEnd(e.target.value.replace(/\D/g, ""))} placeholder="7799999" /></label></>}
-          {selected.part && <label><span>Expected part number</span><input value={expectedPart} onChange={(e) => setExpectedPart(e.target.value)} placeholder="07-1076 05" /></label>}
-          {selected.weight && <label><span>Expected weight</span><input value={expectedWeight} onChange={(e) => setExpectedWeight(e.target.value)} placeholder="25lb" /></label>}
-        </div>
-        <div className="detection-windows legacy-flow">
-          {CHECKS.map((check, index) => {
-            const enabled = selected[check.id];
-            const active = enabled && currentStep?.id === check.id && !finished;
-            const value = piece[check.id] ??
-              (result?.type === check.id && stepIndex === 0 ? result.value : null);
-            const completed = enabled && Object.prototype.hasOwnProperty.call(piece, check.id);
-            return <div
-              className={`detection-window ${active ? "window-active" : ""} ${completed ? "window-complete" : ""} ${!enabled ? "window-disabled" : ""}`}
-              key={check.id}
+          <div className="flex items-center gap-2 text-xs font-semibold">
+            <span
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border ${cameraReady
+                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                  : started
+                    ? "bg-amber-50 text-amber-700 border-amber-200"
+                    : "bg-slate-100 text-slate-600 border-slate-200"
+                }`}
             >
-              <div className="window-heading">
-                <span className="window-number">{index + 1}</span>
-                <strong>{check.label}</strong>
-              </div>
-              <div className="window-value">
-                {!enabled ? "Not selected" : value || (completed ? "Not detected" : "Waiting")}
-              </div>
-              <small>
-                {!enabled ? "This step will be skipped" :
-                  active ? "Active — capture this value now" :
-                  completed ? "Completed" : "Waiting for previous step"}
-              </small>
-            </div>;
-          })}
-        </div>
-        {started && <><div className="panel-heading camera-heading"><div><h2>Camera view</h2><span className="step">{currentStep?.label}</span></div></div>
-        <div className="capture-mode-bar">
-          <label className="auto-capture-toggle">
-            <input
-              type="checkbox"
-              checked={autoCapture}
-              onChange={(e) => setAutoCapture(e.target.checked)}
-            />
-            <span className="toggle-switch"></span>
-            <span className="toggle-text">Auto-capture (Hands-free)</span>
-          </label>
-          {autoCapture && (
-            <span className="auto-badge">
-              <span className="live-dot"></span>
-              Auto-scanning live
+              <span
+                className={`w-2 h-2 rounded-full ${cameraReady ? "bg-emerald-500 animate-pulse" : started ? "bg-amber-500" : "bg-slate-400"
+                  }`}
+              ></span>
+              {cameraReady ? "Camera Live" : started ? "Connecting Camera…" : "System Ready"}
             </span>
-          )}
-        </div>
-        <div className="step-banner">
-          {autoCapture
-            ? `Hold the ${currentStep?.label?.toLowerCase()} steadily in camera view for auto-capture`
-            : `Place the ${currentStep?.label?.toLowerCase()} in the camera view · Attempt ${attemptCount + 1} of 3`}
-        </div>
-        <div className={`camera-view ${captureFlash ? "capture-flash" : ""}`}>
-          {!finished ? (
-            <>
-              <video ref={videoRef} autoPlay playsInline muted onCanPlay={() => setCameraReady(true)} />
-              {autoCapture && cameraReady && !isReading && <div className="scan-laser-line"></div>}
-              {captureFlash && (
-                <div className="capture-flash-overlay">
-                  <span>✓ Captured</span>
+          </div>
+        </header>
+
+        {/* Inspection Session Overview Banner (when started) */}
+        {started && (
+          <section className="bg-white/95 backdrop-blur-sm border border-slate-200 rounded-2xl p-4 sm:p-5 shadow-sm mb-6 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div className="flex flex-wrap items-center gap-2.5 text-xs">
+              {selected.serial && (
+                <div className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 flex flex-col">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Serial Range</span>
+                  <span className="font-mono font-bold text-slate-800">
+                    {rangeStart} – {rangeEnd}
+                  </span>
                 </div>
               )}
-            </>
-          ) : (
-            <div className="camera-message">{finished ? "Session finished" : "Select checks and enter required values."}</div>
-          )}
-          {cameraError && <div className="camera-message">{cameraError}</div>}
-        </div>
-        <button className="primary-button" disabled={!configurationReady || finished || isReading || !cameraReady} onClick={captureAndRead}>
-          <ScanIcon />
-          {isReading
-            ? "Reading…"
-            : autoCapture
-            ? `Capture now (Manual click)`
-            : `Capture ${currentStep?.label || ""}`}
-        </button>
-        <label className={`upload-button ${finished || isReading ? "disabled" : ""}`}>
-          <input
-            type="file"
-            accept="image/jpeg,image/png,image/webp"
-            disabled={finished || isReading}
-            onChange={uploadAndRead}
-          />
-          Upload image for {currentStep?.label}
-        </label>
-        <div className="detected-value">
-          <span>Last detected {result?.type || "value"}</span>
-          <strong>{result ? result.value || "Not detected" : "—"}</strong>
-          {result?.extraSummary && <p className="extra-detected-note">{result.extraSummary}</p>}
-        </div>
-        {result && !result.value && attemptCount > 0 && <p className="retry-message">
-          Not detected. Adjust the item and capture again — {3 - attemptCount} chance{3 - attemptCount === 1 ? "" : "s"} remaining.
-        </p>}
-        {Object.keys(piece).length > 0 && <p className="sequence-note">Continue with the next step for the same piece.</p>}
-        </>}
+              {selected.part && (
+                <div className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 flex flex-col">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Expected Part #</span>
+                  <span className="font-mono font-bold text-slate-800">{expectedPart}</span>
+                </div>
+              )}
+              {selected.weight && (
+                <div className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 flex flex-col">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Expected Weight</span>
+                  <span className="font-mono font-bold text-slate-800">{expectedWeight}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Stepper (1 -> 2 -> 3) */}
+            <div className="flex items-center gap-2 overflow-x-auto pb-1 md:pb-0">
+              {steps.map((step, index) => {
+                const completed = Object.prototype.hasOwnProperty.call(piece, step.id);
+                const active = index === stepIndex && !finished;
+                return (
+                  <div
+                    key={step.id}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all border ${active
+                        ? "bg-lime-500 text-slate-950 border-lime-600 shadow-sm"
+                        : completed
+                          ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+                          : "bg-slate-100 text-slate-400 border-slate-200"
+                      }`}
+                  >
+                    <span
+                      className={`w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-bold ${active
+                          ? "bg-slate-950 text-lime-400"
+                          : completed
+                            ? "bg-emerald-600 text-white"
+                            : "bg-slate-200 text-slate-500"
+                        }`}
+                    >
+                      {completed ? "✓" : index + 1}
+                    </span>
+                    <span>{step.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* Main Workspace */}
+        {!started ? (
+          /* Operator Setup Card */
+          <div className="max-w-2xl mx-auto w-full">
+            <div className="bg-white border border-slate-200 rounded-3xl p-6 sm:p-8 shadow-sm">
+              <div className="flex items-center gap-3.5 mb-6 pb-5 border-b border-slate-100">
+                <div className="w-10 h-10 rounded-2xl bg-lime-500 text-slate-950 font-black text-lg flex items-center justify-center shadow-sm">
+                  1
+                </div>
+                <div>
+                  <h2 className="text-xl font-bold text-slate-900 tracking-tight">Set up inspection</h2>
+                  <p className="text-xs text-slate-500">Select the required checks and specify target values.</p>
+                </div>
+              </div>
+
+              <div className="space-y-4 mb-6">
+                {/* Serial check option */}
+                <div
+                  className={`p-4 rounded-2xl border transition-all ${selected.serial
+                      ? "bg-lime-50/40 border-lime-200 ring-1 ring-lime-200"
+                      : "bg-slate-50/60 border-slate-200"
+                    }`}
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <label className="flex items-center gap-3 cursor-pointer font-bold text-sm text-slate-800 select-none">
+                      <input
+                        type="checkbox"
+                        checked={selected.serial}
+                        onChange={(e) => setSelected({ ...selected, serial: e.target.checked })}
+                        className="w-4 h-4 rounded text-lime-600 focus:ring-lime-500 accent-lime-600 cursor-pointer"
+                      />
+                      <span>Serial number</span>
+                    </label>
+                    {selected.serial ? (
+                      <div className="grid grid-cols-2 gap-2 sm:w-72">
+                        <div>
+                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                            Range Start
+                          </label>
+                          <input
+                            inputMode="numeric"
+                            value={rangeStart}
+                            onChange={(e) => setRangeStart(e.target.value.replace(/\D/g, ""))}
+                            placeholder="7700000"
+                            className="w-full px-3 py-2 text-xs font-mono bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-lime-500 focus:border-transparent"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                            Range End
+                          </label>
+                          <input
+                            inputMode="numeric"
+                            value={rangeEnd}
+                            onChange={(e) => setRangeEnd(e.target.value.replace(/\D/g, ""))}
+                            placeholder="7799999"
+                            className="w-full px-3 py-2 text-xs font-mono bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-lime-500 focus:border-transparent"
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-slate-400 italic">Check box to enable</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Part check option */}
+                <div
+                  className={`p-4 rounded-2xl border transition-all ${selected.part
+                      ? "bg-lime-50/40 border-lime-200 ring-1 ring-lime-200"
+                      : "bg-slate-50/60 border-slate-200"
+                    }`}
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <label className="flex items-center gap-3 cursor-pointer font-bold text-sm text-slate-800 select-none">
+                      <input
+                        type="checkbox"
+                        checked={selected.part}
+                        onChange={(e) => setSelected({ ...selected, part: e.target.checked })}
+                        className="w-4 h-4 rounded text-lime-600 focus:ring-lime-500 accent-lime-600 cursor-pointer"
+                      />
+                      <span>Part number</span>
+                    </label>
+                    {selected.part ? (
+                      <div className="sm:w-72">
+                        <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                          Expected Part Number
+                        </label>
+                        <input
+                          value={expectedPart}
+                          onChange={(e) => setExpectedPart(e.target.value)}
+                          placeholder="07-1076 05"
+                          className="w-full px-3 py-2 text-xs font-mono bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-lime-500 focus:border-transparent"
+                        />
+                      </div>
+                    ) : (
+                      <span className="text-xs text-slate-400 italic">Check box to enable</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Weight check option */}
+                <div
+                  className={`p-4 rounded-2xl border transition-all ${selected.weight
+                      ? "bg-lime-50/40 border-lime-200 ring-1 ring-lime-200"
+                      : "bg-slate-50/60 border-slate-200"
+                    }`}
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <label className="flex items-center gap-3 cursor-pointer font-bold text-sm text-slate-800 select-none">
+                      <input
+                        type="checkbox"
+                        checked={selected.weight}
+                        onChange={(e) => setSelected({ ...selected, weight: e.target.checked })}
+                        className="w-4 h-4 rounded text-lime-600 focus:ring-lime-500 accent-lime-600 cursor-pointer"
+                      />
+                      <span>Weight number</span>
+                    </label>
+                    {selected.weight ? (
+                      <div className="sm:w-72">
+                        <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                          Expected Weight
+                        </label>
+                        <input
+                          value={expectedWeight}
+                          onChange={(e) => setExpectedWeight(e.target.value)}
+                          placeholder="25lb"
+                          className="w-full px-3 py-2 text-xs font-mono bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-lime-500 focus:border-transparent"
+                        />
+                      </div>
+                    ) : (
+                      <span className="text-xs text-slate-400 italic">Check box to enable</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <button
+                disabled={!configurationReady}
+                onClick={() => {
+                  setStarted(true);
+                  setCameraReady(false);
+                  setCameraError("");
+                }}
+                className="w-full py-3.5 px-6 rounded-2xl bg-lime-500 hover:bg-lime-400 active:scale-[0.99] text-slate-950 font-bold text-sm tracking-wide transition shadow-lg shadow-lime-500/20 disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
+              >
+                Start Inspection Session
+              </button>
+            </div>
+          </div>
+        ) : (
+          /* Active Inspection 2-Column Grid */
+          <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            {/* Left Column: Live Camera & Controls */}
+            <div className="lg:col-span-7 space-y-4">
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-sm space-y-4">
+                {/* View Header */}
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                  <div>
+                    <h2 className="text-base font-bold text-slate-900">Camera View</h2>
+                    <p className="text-xs text-slate-500">Live optical inspection station</p>
+                  </div>
+                  <span className="px-3 py-1 rounded-full text-xs font-bold bg-lime-100 text-lime-900 border border-lime-300/80">
+                    Active: {currentStep?.label}
+                  </span>
+                </div>
+
+                {/* Auto-Capture Toggle Bar */}
+                <div className="flex items-center justify-between bg-slate-50 border border-slate-200/80 rounded-xl p-3">
+                  <label className="flex items-center gap-3 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={autoCapture}
+                      onChange={(e) => setAutoCapture(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-10 h-6 bg-slate-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-lime-500 relative"></div>
+                    <span className="text-xs font-bold text-slate-800">Auto-capture (Hands-free)</span>
+                  </label>
+                  {autoCapture && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                      <span className="relative flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                      </span>
+                      Auto-scanning live
+                    </span>
+                  )}
+                </div>
+
+                {/* Guidance Banner */}
+                <div className="bg-lime-50/60 border border-lime-200/80 rounded-xl px-3.5 py-2.5 text-xs text-lime-900 font-medium flex items-center gap-2">
+                  <span className="text-lime-700 font-bold">ℹ</span>
+                  {autoCapture
+                    ? `Hold the ${currentStep?.label?.toLowerCase()} steadily in camera view for hands-free capture.`
+                    : `Place the ${currentStep?.label?.toLowerCase()} in camera view · Attempt ${attemptCount + 1} of 3.`}
+                </div>
+
+                {/* Video View Box */}
+                <div className="relative w-full aspect-[4/3] bg-slate-950 rounded-2xl overflow-hidden border-2 border-slate-900 shadow-inner flex items-center justify-center">
+                  {!finished ? (
+                    <>
+                      <video
+                        ref={videoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        onCanPlay={() => setCameraReady(true)}
+                        className="w-full h-full object-cover"
+                      />
+                      {autoCapture && cameraReady && !isReading && <div className="scan-laser-line"></div>}
+                      {captureFlash && (
+                        <div className="absolute inset-0 bg-lime-500/20 backdrop-blur-[2px] border-4 border-lime-400 flex items-center justify-center transition-all">
+                          <span className="bg-lime-500 text-slate-950 font-black px-4 py-2 rounded-full shadow-lg text-sm tracking-wide">
+                            ✓ Captured
+                          </span>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="text-slate-400 text-xs font-semibold">Inspection session finished</div>
+                  )}
+                  {cameraError && (
+                    <div className="absolute inset-x-4 bottom-4 bg-rose-900/90 text-white text-xs p-3 rounded-xl backdrop-blur-sm border border-rose-700">
+                      {cameraError}
+                    </div>
+                  )}
+                </div>
+
+                {/* Primary Action Buttons */}
+                <button
+                  disabled={!configurationReady || finished || isReading || !cameraReady}
+                  onClick={captureAndRead}
+                  className="w-full py-3.5 px-4 bg-slate-900 hover:bg-slate-800 active:scale-[0.99] text-white font-bold rounded-xl transition flex items-center justify-center gap-2 shadow-sm text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <ScanIcon />
+                  {isReading
+                    ? "Reading…"
+                    : autoCapture
+                      ? "Capture now (Manual click)"
+                      : `Capture ${currentStep?.label || ""}`}
+                </button>
+
+                <label
+                  className={`w-full py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-xl transition flex items-center justify-center cursor-pointer border border-slate-200 ${finished || isReading ? "opacity-50 pointer-events-none" : ""
+                    }`}
+                >
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    disabled={finished || isReading}
+                    onChange={uploadAndRead}
+                    className="hidden"
+                  />
+                  Upload image for {currentStep?.label}
+                </label>
+
+                {/* Detected Value Card */}
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 flex flex-col gap-1">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Last detected {result?.type || "value"}
+                  </span>
+                  <strong className="font-mono text-xl font-bold text-slate-900 tracking-tight">
+                    {result ? result.value || "Not detected" : "—"}
+                  </strong>
+                  {result?.extraSummary && (
+                    <div className="mt-1 inline-flex items-center text-xs font-semibold text-emerald-800 bg-emerald-100 border border-emerald-300 rounded-lg px-2.5 py-1 w-fit">
+                      {result.extraSummary}
+                    </div>
+                  )}
+                </div>
+
+                {/* Retry / Guidance Feedback */}
+                {result && !result.value && attemptCount > 0 && (
+                  <div className="bg-amber-50 border border-amber-200 text-amber-900 text-xs p-3 rounded-xl font-medium">
+                    Not detected. Adjust the item and capture again — {3 - attemptCount} chance
+                    {3 - attemptCount === 1 ? "" : "s"} remaining.
+                  </div>
+                )}
+                {Object.keys(piece).length > 0 && (
+                  <p className="text-xs text-slate-500 italic text-center">
+                    Continue with the next step for the same piece.
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* Right Column: OCR Results & Inspection Log Table */}
+            <div className="lg:col-span-5 space-y-4">
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-sm flex flex-col min-h-[520px]">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+                  <div>
+                    <h2 className="text-base font-bold text-slate-900">OCR result</h2>
+                    <p className="text-xs text-slate-500">Completed pieces verification log</p>
+                  </div>
+                  <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-700">
+                    {readings.length} {readings.length === 1 ? "piece" : "pieces"}
+                  </span>
+                </div>
+
+                {!readings.length ? (
+                  <div className="flex-1 flex flex-col items-center justify-center p-8 border-2 border-dashed border-slate-200 rounded-xl text-center text-slate-400 text-xs leading-relaxed">
+                    <span className="text-2xl mb-2">📋</span>
+                    <span>A completed piece will appear after all selected checks.</span>
+                  </div>
+                ) : (
+                  <div className="flex-1 overflow-y-auto max-h-[460px] border border-slate-200 rounded-xl divide-y divide-slate-100">
+                    <div className="grid grid-cols-4 bg-slate-50 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 sticky top-0 z-10">
+                      <span>Serial</span>
+                      <span>Part number</span>
+                      <span>Weight</span>
+                      <span>Status</span>
+                    </div>
+                    {readings.map((row) => {
+                      const statusBg =
+                        row.status === "In range"
+                          ? "border-l-4 border-l-emerald-500 bg-emerald-50/40"
+                          : row.status === "Duplicate"
+                            ? "border-l-4 border-l-amber-500 bg-amber-50/40"
+                            : row.status === "Out of range"
+                              ? "border-l-4 border-l-rose-500 bg-rose-50/40"
+                              : "border-l-4 border-l-slate-400 bg-slate-50/40";
+                      return (
+                        <div
+                          key={row.id}
+                          className={`grid grid-cols-4 items-center px-3 py-2.5 text-xs transition-colors hover:bg-slate-50 ${statusBg}`}
+                        >
+                          <span className="font-mono font-bold text-slate-900 truncate pr-1">{row.serial}</span>
+                          <div className="truncate pr-1">
+                            <div className="font-mono text-slate-800 text-[11px] truncate">{row.part_number}</div>
+                            <div
+                              className={`text-[9px] font-bold ${row.part_check === "Matched"
+                                  ? "text-emerald-700"
+                                  : row.part_check === "Mismatched"
+                                    ? "text-rose-600"
+                                    : "text-slate-400"
+                                }`}
+                            >
+                              {row.part_check}
+                            </div>
+                          </div>
+                          <div className="truncate pr-1">
+                            <div className="font-mono text-slate-800 text-[11px] truncate">{row.weight}</div>
+                            <div
+                              className={`text-[9px] font-bold ${row.weight_check === "Matched"
+                                  ? "text-emerald-700"
+                                  : row.weight_check === "Mismatched"
+                                    ? "text-rose-600"
+                                    : "text-slate-400"
+                                }`}
+                            >
+                              {row.weight_check}
+                            </div>
+                          </div>
+                          <div>
+                            <span
+                              className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${row.status === "In range"
+                                  ? "bg-emerald-100 text-emerald-800"
+                                  : row.status === "Duplicate"
+                                    ? "bg-amber-100 text-amber-800"
+                                    : row.status === "Out of range"
+                                      ? "bg-rose-100 text-rose-800"
+                                      : "bg-slate-200 text-slate-700"
+                                }`}
+                            >
+                              {row.status}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Session Action Buttons */}
+                <div className="pt-4 border-t border-slate-100 mt-4 space-y-3">
+                  {!finished ? (
+                    <button
+                      disabled={!readings.length || isReading}
+                      onClick={finishSession}
+                      className="w-full py-3 bg-white hover:bg-slate-50 border-2 border-slate-300 hover:border-slate-400 text-slate-800 font-bold rounded-xl transition text-xs tracking-wide disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Finish session
+                    </button>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        onClick={downloadReport}
+                        className="py-3 px-4 bg-lime-500 hover:bg-lime-400 text-slate-950 font-bold rounded-xl transition text-xs shadow-sm"
+                      >
+                        Download CSV
+                      </button>
+                      <button
+                        onClick={reset}
+                        className="py-3 px-4 bg-white hover:bg-slate-50 border border-slate-300 text-slate-800 font-bold rounded-xl transition text-xs"
+                      >
+                        Start new range
+                      </button>
+                    </div>
+                  )}
+
+                  {savedSession && (
+                    <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-medium text-center">
+                      Saved to MySQL and JSON · ID <strong className="font-mono">{savedSession.session_id}</strong>
+                    </div>
+                  )}
+                  {saveError && (
+                    <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-medium text-center">
+                      {saveError}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
       </div>
-      <div className={`panel readings-panel ${!started ? "setup-hidden" : ""}`}>
-        <h2>OCR result</h2>
-        {!readings.length ? <div className="empty-readings">A completed piece will appear after all selected checks.</div> :
-          <div className="readings-grid">
-            <div className="reading-row reading-header"><span>Serial</span><span>Part number</span><span>Weight</span><span>Status</span></div>
-            {readings.map((row) => <div className={`reading-row row-${row.status.toLowerCase().replaceAll(" ", "-")}`} key={row.id}>
-              <strong data-label="Serial">{row.serial}</strong>
-              <span data-label="Part">{row.part_number}<small>{row.part_check}</small></span>
-              <span data-label="Weight">{row.weight}<small>{row.weight_check}</small></span>
-              <span data-label="Status" className="status-label">{row.status}</span>
-            </div>)}
-          </div>}
-        {!finished ? <button className="finish-button" disabled={!readings.length || isReading} onClick={finishSession}>Finish session</button> :
-          <div className="report-actions"><button className="primary-button" onClick={downloadReport}>Download CSV</button><button className="finish-button" onClick={reset}>Start new range</button></div>}
-        {savedSession && <p className="saved-message">Saved to MySQL and JSON · ID {savedSession.session_id}</p>}
-        {saveError && <p className="save-error">{saveError}</p>}
-      </div>
-    </section>
-  </main>;
+    </main>
+  );
 }
 
 export default App;
