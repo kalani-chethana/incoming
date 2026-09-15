@@ -65,7 +65,7 @@ function App() {
   }, [started, configurationReady, finished]);
 
   function normalize(value) {
-    return value.trim().toUpperCase().replace(/[_–—]/g, "-").replace(/\s+/g, " ");
+    return value.trim().toUpperCase().replace(/[_–—\s]+/g, "-");
   }
 
   function normalizeWeight(value) {
@@ -93,10 +93,15 @@ function App() {
       else if (readings.some((item) => item.serial.replace(/\D/g, "") === values.serial.replace(/\D/g, ""))) status = "Duplicate";
       else status = "In range";
     }
+    const partExpectedDigits = expectedPart.replace(/\D/g, "");
+    const partActualDigits = (values.part || "").replace(/\D/g, "");
+    const partMatched = normalize(values.part || "") === normalize(expectedPart) ||
+      (Boolean(partExpectedDigits) && partActualDigits === partExpectedDigits);
+
     const row = {
       id: Date.now(), time: new Date().toLocaleTimeString(), serial, status,
       part_number: values.part || (selected.part ? "Not detected" : "Not checked"),
-      part_check: !selected.part ? "Not checked" : !values.part ? "Not detected" : normalize(values.part) === normalize(expectedPart) ? "Matched" : "Mismatched",
+      part_check: !selected.part ? "Not checked" : !values.part ? "Not detected" : partMatched ? "Matched" : "Mismatched",
       weight: values.weight || (selected.weight ? "Not detected" : "Not checked"),
       weight_check: !selected.weight ? "Not checked" : !values.weight ? "Not detected" : normalizeWeight(values.weight) === normalizeWeight(expectedWeight) ? "Matched" : "Mismatched",
     };
@@ -128,25 +133,116 @@ function App() {
     try {
       const form = new FormData();
       form.append("image", image);
-      const response = await fetch(`/api/read-serial?check_type=${currentStep.id}&minimum_confidence=0.30`, { method: "POST", body: form });
+      const params = new URLSearchParams({
+        check_type: currentStep.id,
+        minimum_confidence: "0.30",
+      });
+
+      if (currentStep.id === "serial") {
+        params.set("check_types", selected.weight ? "serial,weight" : "serial");
+      } else if (currentStep.id === "part") {
+        params.set("check_types", "part");
+        if (expectedPart.trim()) {
+          params.set("expected_part", expectedPart.trim());
+        }
+        const knownSerial = piece.serial ? String(piece.serial).trim() : "";
+        if (knownSerial && knownSerial !== "Not detected") {
+          params.set("exclude_serial", knownSerial);
+        }
+      } else if (currentStep.id === "weight") {
+        params.set("check_types", "weight");
+      }
+
+      const response = await fetch(`/api/read-serial?${params.toString()}`, {
+        method: "POST",
+        body: form,
+      });
       const payload = await parseJsonResponse(response, "OCR failed");
-      const value = payload.value || null;
+
+      const detectedValues: Record<string, string> = {};
+      if (payload.values && typeof payload.values === "object") {
+        for (const [k, v] of Object.entries(payload.values)) {
+          if (typeof v === "string" && v.trim()) {
+            detectedValues[k] = v.trim();
+          }
+        }
+      }
+      if (payload.value && !detectedValues[currentStep.id]) {
+        detectedValues[currentStep.id] = String(payload.value).trim();
+      }
+
+      // Safeguard: serial number digits must NEVER be assigned to part number
+      const serialDigits = (detectedValues.serial || piece.serial || "").replace(/\D/g, "");
+      if (detectedValues.part) {
+        const partDigits = detectedValues.part.replace(/\D/g, "");
+        if (serialDigits && partDigits === serialDigits) {
+          delete detectedValues.part;
+        }
+      }
+
+      const value = detectedValues[currentStep.id] || null;
       const attempt = attemptCount + 1;
-      setResult({ type: currentStep.id, value, attempt });
+
+      let extraSummary = "";
+      if (currentStep.id === "serial" && selected.weight && detectedValues.weight && !piece.weight) {
+        extraSummary = `Also captured Weight: ${detectedValues.weight} (Step 3 auto-completes)`;
+      }
+
+      setResult({ type: currentStep.id, value, attempt, extraSummary });
+
       if (!value && attempt < 3) {
         setAttemptCount(attempt);
         return;
       }
+
       setAttemptCount(0);
-      const nextPiece = { ...piece, [currentStep.id]: value };
-      setPiece(nextPiece);
-      if (stepIndex === steps.length - 1) finishPiece(nextPiece);
-      else setStepIndex((index) => index + 1);
+
+      const nextPiece: Record<string, string> = { ...piece };
+      if (value) {
+        nextPiece[currentStep.id] = value;
+      } else {
+        nextPiece[currentStep.id] = "";
+      }
+
+      // ONLY in Step 1 (serial): if weight is detected on the same surface, auto-record it
+      if (currentStep.id === "serial" && selected.weight && detectedValues.weight && !nextPiece.weight) {
+        nextPiece.weight = detectedValues.weight;
+      }
+
+      // Strict 1 -> 2 -> 3 workflow progression (no other skips)
+      if (currentStep.id === "serial") {
+        // Step 1 ALWAYS advances to Step 2 (Part number) if selected
+        if (selected.part) {
+          const partIndex = steps.findIndex((s) => s.id === "part");
+          setPiece(nextPiece);
+          setStepIndex(partIndex);
+        } else if (selected.weight && !nextPiece.weight) {
+          const weightIndex = steps.findIndex((s) => s.id === "weight");
+          setPiece(nextPiece);
+          setStepIndex(weightIndex);
+        } else {
+          finishPiece(nextPiece);
+        }
+      } else if (currentStep.id === "part") {
+        // Step 2 advances to Step 3 (Weight) unless weight was already captured in Step 1
+        if (selected.weight && !nextPiece.weight) {
+          const weightIndex = steps.findIndex((s) => s.id === "weight");
+          setPiece(nextPiece);
+          setStepIndex(weightIndex);
+        } else {
+          finishPiece(nextPiece);
+        }
+      } else {
+        // Step 3 (Weight) or last step finishes the piece
+        finishPiece(nextPiece);
+      }
     } catch (error) {
       setSaveError(
         error instanceof TypeError
           ? "Cannot reach the OCR server. Please check backend connection."
-          : error.message || "An unexpected error occurred."
+          : error instanceof Error
+          ? error.message
+          : "An unexpected error occurred."
       );
     } finally {
       setIsReading(false);
@@ -300,7 +396,11 @@ function App() {
           />
           Upload image for {currentStep?.label}
         </label>
-        <div className="detected-value"><span>Last detected {result?.type || "value"}</span><strong>{result ? result.value || "Not detected" : "—"}</strong></div>
+        <div className="detected-value">
+          <span>Last detected {result?.type || "value"}</span>
+          <strong>{result ? result.value || "Not detected" : "—"}</strong>
+          {result?.extraSummary && <p className="extra-detected-note">{result.extraSummary}</p>}
+        </div>
         {result && !result.value && attemptCount > 0 && <p className="retry-message">
           Not detected. Adjust the item and capture again — {3 - attemptCount} chance{3 - attemptCount === 1 ? "" : "s"} remaining.
         </p>}

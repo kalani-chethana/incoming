@@ -286,6 +286,151 @@ def _format_serial(detected_text: str) -> str:
     return re.sub(r"\s", "", stripped_text)
 
 
+def _extract_serial_from_results(
+    results: list[tuple[Any, str, float]],
+    minimum_confidence: float = MINIMUM_CONFIDENCE,
+    expected_part_digits: str | None = None,
+) -> tuple[str, float]:
+    """Extract best serial number candidate from an OCR result set."""
+    filtered_results = _without_weight_fragments(results)
+    best_number = ""
+    best_confidence = 0.0
+    for row in _group_digit_rows(filtered_results, minimum_confidence):
+        row.sort(key=lambda result: _box_coordinates(result)[0])
+        combined_text = " ".join(
+            detected_text.strip()
+            for _, detected_text, _ in row
+        )
+        complete_number = _format_serial(combined_text)
+        digits_only = re.sub(r"[^0-9]", "", complete_number)
+        digit_count = len(digits_only)
+        if digit_count < MINIMUM_SERIAL_LENGTH:
+            continue
+        # Never treat expected part number as a serial number
+        if expected_part_digits and digits_only == expected_part_digits:
+            continue
+        confidence = sum(item[2] for item in row) / len(row)
+        if confidence > best_confidence:
+            best_number = complete_number
+            best_confidence = confidence
+    return best_number, best_confidence
+
+
+def _extract_pattern_from_results(
+    results: list[tuple[Any, str, float]],
+    check_type: str,
+    minimum_confidence: float = MINIMUM_CONFIDENCE,
+    exclude_digits: set[str] | None = None,
+    expected_value: str | None = None,
+) -> tuple[str, float]:
+    """Extract best part or weight candidate from an OCR result set."""
+    patterns = {
+        "part": re.compile(r"^[A-Z0-9]+(?:[ -][A-Z0-9]+)*$", re.I),
+        "weight": re.compile(r"^\d+(?:\.\d+)?\s*(?:LB|LBS|KG|G)$", re.I),
+    }
+    pattern = patterns.get(check_type)
+    if pattern is None:
+        return "", 0.0
+
+    weight_units_pattern = re.compile(r"(?:LB|LBS|KG|G|1B|IB)$", re.I)
+
+    # Safe exclude set: NEVER exclude the expected part number
+    safe_exclude_digits: set[str] = set(exclude_digits or ())
+    expected_digits = (
+        re.sub(r"[^0-9]", "", expected_value) if expected_value else None
+    )
+    if expected_digits:
+        safe_exclude_digits.discard(expected_digits)
+
+    candidates: list[tuple[str, float]] = []
+
+    # 1. Direct bounding boxes and sub-matches for labeled text (e.g. "PART: 07-1076 05")
+    for _, text, confidence in results:
+        candidates.append((text, confidence))
+        if check_type == "part":
+            sub_matches = re.findall(r"[A-Z0-9]+(?:[ -][A-Z0-9]+)+", text, re.I)
+            for sub in sub_matches:
+                candidates.append((sub, confidence))
+
+    # 2. Grouped rows for adjacent boxes (e.g. "07-1076" followed by "05")
+    for row in _group_text_rows(results, minimum_confidence):
+        for start in range(len(row)):
+            for end in range(start + 2, len(row) + 1):
+                section = row[start:end]
+                combined = "".join(item[1].strip() for item in section)
+                spaced = " ".join(item[1].strip() for item in section)
+                confidence = sum(item[2] for item in section) / len(section)
+                candidates.append((combined, confidence))
+                candidates.append((spaced, confidence))
+
+    best_value, best_confidence = "", 0.0
+    best_digit_count = 0
+
+    for text, confidence in candidates:
+        if check_type == "part":
+            raw_clean = re.sub(r"\s+", "", text)
+            # Never treat weight text (containing LB/KG units) as a part number
+            if weight_units_pattern.search(raw_clean):
+                continue
+            normalized = _normalize_ocr_serial_text(text).strip()
+            normalized = re.sub(r"\s*-\s*", "-", normalized)
+            normalized = re.sub(r"\s+", " ", normalized)
+            digits_only = re.sub(r"[^0-9]", "", normalized)
+
+            # Never treat serial number digits as a part number
+            if safe_exclude_digits and digits_only in safe_exclude_digits:
+                continue
+        else:
+            normalized = re.sub(r"\s+", "", text).upper()
+            normalized = re.sub(r"(?<=\d)(?:IB|1B)$", "LB", normalized)
+
+        enough_digits = (
+            check_type != "part"
+            or len(re.sub(r"[^0-9]", "", normalized)) >= 4
+        )
+        if (
+            confidence >= minimum_confidence
+            and enough_digits
+            and pattern.fullmatch(normalized)
+        ):
+            digits_only = re.sub(r"[^0-9]", "", normalized)
+            digit_count = len(digits_only)
+            if check_type == "part" and expected_digits:
+                matches_expected = (digits_only == expected_digits)
+                best_matches_expected = (
+                    re.sub(r"[^0-9]", "", best_value) == expected_digits
+                    if best_value
+                    else False
+                )
+                if matches_expected and not best_matches_expected:
+                    is_better = True
+                elif not matches_expected and best_matches_expected:
+                    is_better = False
+                else:
+                    is_better = confidence > best_confidence
+            else:
+                is_better = (
+                    digit_count > best_digit_count
+                    if check_type == "part"
+                    else confidence > best_confidence
+                )
+                if (
+                    check_type == "part"
+                    and digit_count == best_digit_count
+                    and confidence > best_confidence
+                ):
+                    is_better = True
+
+            if is_better:
+                if check_type == "part" and expected_digits and digits_only == expected_digits and expected_value:
+                    best_value = expected_value.strip()
+                else:
+                    best_value = normalized
+                best_confidence = confidence
+                best_digit_count = digit_count
+    return best_value, best_confidence
+
+
 def read_serial_number(
     reader: Any,
     image: np.ndarray,
@@ -299,25 +444,138 @@ def read_serial_number(
 
     for variant_name, processed_image in processed_images:
         results = _extract_results(reader.ocr(processed_image, cls=False))
-        results = _without_weight_fragments(results)
-        for row in _group_digit_rows(results, minimum_confidence):
-            row.sort(key=lambda result: _box_coordinates(result)[0])
-            combined_text = " ".join(
-                detected_text.strip()
-                for _, detected_text, _ in row
-            )
-            complete_number = _format_serial(combined_text)
-            digit_count = len(re.sub(r"[^0-9]", "", complete_number))
-            if digit_count < MINIMUM_SERIAL_LENGTH:
-                continue
-            confidence = sum(item[2] for item in row) / len(row)
-            if confidence > best_confidence:
-                best_number = complete_number
-                best_confidence = confidence
-                best_variant = variant_name
-                best_image = processed_image
+        number, confidence = _extract_serial_from_results(
+            results, minimum_confidence
+        )
+        if number and confidence > best_confidence:
+            best_number = number
+            best_confidence = confidence
+            best_variant = variant_name
+            best_image = processed_image
 
     return best_number, best_confidence, best_variant, best_image
+
+
+def read_multi_values(
+    reader: Any,
+    image: np.ndarray,
+    check_types: list[str],
+    minimum_confidence: float = MINIMUM_CONFIDENCE,
+    expected_part: str | None = None,
+    exclude_serial: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Extract multiple check types (serial, weight, part) in a single OCR pass."""
+    targets = set(check_types)
+    best_matches: dict[str, dict[str, Any]] = {
+        ct: {"value": "", "confidence": 0.0, "variant": ""}
+        for ct in ("serial", "part", "weight")
+    }
+
+    expected_part_digits = (
+        re.sub(r"\D", "", expected_part) if expected_part else None
+    )
+
+    # Pass 1: Extract serial and weight across variants
+    all_variant_results: list[tuple[str, list[tuple[Any, str, float]]]] = []
+    for variant_name, processed_image in preprocess_image(image):
+        results = _extract_results(reader.ocr(processed_image, cls=False))
+        all_variant_results.append((variant_name, results))
+        if "serial" in targets:
+            serial_val, serial_conf = _extract_serial_from_results(
+                results, minimum_confidence, expected_part_digits=expected_part_digits
+            )
+            if serial_val and serial_conf > best_matches["serial"]["confidence"]:
+                best_matches["serial"] = {
+                    "value": serial_val,
+                    "confidence": serial_conf,
+                    "variant": variant_name,
+                }
+        if "weight" in targets or "serial" in targets:
+            val, conf = _extract_pattern_from_results(
+                results, "weight", minimum_confidence
+            )
+            if val and conf > best_matches["weight"]["confidence"]:
+                best_matches["weight"] = {
+                    "value": val,
+                    "confidence": conf,
+                    "variant": variant_name,
+                }
+
+    # Pass 2: Extract part, strictly excluding digits of the known serial
+    if "part" in targets:
+        exclude_digits: set[str] = set()
+        if exclude_serial:
+            exclude_digits.add(re.sub(r"\D", "", exclude_serial))
+        detected_serial = best_matches["serial"]["value"]
+        if detected_serial:
+            s_digs = re.sub(r"\D", "", detected_serial)
+            if s_digs and s_digs != expected_part_digits:
+                exclude_digits.add(s_digs)
+
+        if expected_part_digits:
+            exclude_digits.discard(expected_part_digits)
+
+        for variant_name, results in all_variant_results:
+            val, conf = _extract_pattern_from_results(
+                results,
+                "part",
+                minimum_confidence,
+                exclude_digits=exclude_digits,
+                expected_value=expected_part,
+            )
+            if not val:
+                continue
+
+            cur_digits = re.sub(r"\D", "", val)
+            best_val = best_matches["part"]["value"]
+            best_digits = re.sub(r"\D", "", best_val) if best_val else ""
+
+            cur_matches_exp = (
+                (cur_digits == expected_part_digits)
+                if expected_part_digits
+                else False
+            )
+            best_matches_exp = (
+                (best_digits == expected_part_digits)
+                if expected_part_digits and best_val
+                else False
+            )
+
+            if cur_matches_exp and not best_matches_exp:
+                is_better = True
+            elif not cur_matches_exp and best_matches_exp:
+                is_better = False
+            elif len(cur_digits) > len(best_digits):
+                is_better = True
+            elif len(cur_digits) < len(best_digits):
+                is_better = False
+            else:
+                is_better = conf > best_matches["part"]["confidence"]
+
+            if is_better:
+                best_matches["part"] = {
+                    "value": val,
+                    "confidence": conf,
+                    "variant": variant_name,
+                }
+
+        # Final check: if nothing was selected yet and expected_part is set,
+        # do a targeted search for expected_part_digits across all OCR results
+        if not best_matches["part"]["value"] and expected_part_digits:
+            for variant_name, results in all_variant_results:
+                for _, text, conf in results:
+                    clean = re.sub(r"\D", "", text)
+                    if expected_part_digits in clean or clean == expected_part_digits:
+                        best_matches["part"] = {
+                            "value": expected_part.strip(),
+                            "confidence": max(conf, 0.95),
+                            "variant": variant_name,
+                        }
+                        break
+                if best_matches["part"]["value"]:
+                    break
+
+    return best_matches
 
 
 def read_typed_value(
@@ -325,77 +583,20 @@ def read_typed_value(
     image: np.ndarray,
     check_type: str,
     minimum_confidence: float = MINIMUM_CONFIDENCE,
+    expected_part: str | None = None,
+    exclude_serial: str | None = None,
 ) -> tuple[str, float, str]:
     """Read one value according to the active UI step."""
-    if check_type == "serial":
-        value, confidence, variant, _ = read_serial_number(
-            reader, image, minimum_confidence
-        )
-        return value, confidence, variant
-
-    patterns = {
-        "part": re.compile(r"^\d+(?:[ -]\d+)*$"),
-        "weight": re.compile(r"^\d+(?:\.\d+)?\s*(?:LB|LBS|KG|G)$", re.I),
-    }
-    pattern = patterns.get(check_type)
-    if pattern is None:
-        raise ValueError("check_type must be serial, part, or weight.")
-
-    best_value, best_confidence, best_variant = "", 0.0, ""
-    best_digit_count = 0
-    for variant_name, processed_image in preprocess_image(image):
-        results = _extract_results(reader.ocr(processed_image, cls=False))
-        candidates = [(text, confidence) for _, text, confidence in results]
-        for row in _group_text_rows(results, minimum_confidence):
-            # Try contiguous fragments as well as the complete row. PaddleOCR
-            # commonly returns "25" and "lb" as two boxes on the same line.
-            for start in range(len(row)):
-                for end in range(start + 2, len(row) + 1):
-                    section = row[start:end]
-                    combined = "".join(item[1].strip() for item in section)
-                    spaced = " ".join(item[1].strip() for item in section)
-                    confidence = sum(item[2] for item in section) / len(section)
-                    candidates.append((combined, confidence))
-                    candidates.append((spaced, confidence))
-
-        for text, confidence in candidates:
-            if check_type == "part":
-                normalized = _normalize_ocr_serial_text(text).strip()
-                normalized = re.sub(r"\s*-\s*", "-", normalized)
-                normalized = re.sub(r"\s+", " ", normalized)
-            else:
-                # Keep LB/KG unit letters; the serial correction map changes
-                # L/B/G into digits and is intentionally not used for weight.
-                normalized = re.sub(r"\s+", "", text).upper()
-                normalized = re.sub(r"(?<=\d)(?:IB|1B)$", "LB", normalized)
-            enough_digits = (
-                check_type != "part"
-                or len(re.sub(r"[^0-9]", "", normalized)) >= 4
-            )
-            if (
-                confidence >= minimum_confidence
-                and enough_digits
-                and pattern.fullmatch(normalized)
-            ):
-                digit_count = len(re.sub(r"[^0-9]", "", normalized))
-                is_better = (
-                    digit_count > best_digit_count
-                    if check_type == "part"
-                    else confidence > best_confidence
-                )
-                if (
-                    is_better
-                    or (
-                        check_type == "part"
-                        and digit_count == best_digit_count
-                        and confidence > best_confidence
-                    )
-                ):
-                    best_value = normalized
-                    best_confidence = confidence
-                    best_variant = variant_name
-                    best_digit_count = digit_count
-    return best_value, best_confidence, best_variant
+    matches = read_multi_values(
+        reader,
+        image,
+        [check_type],
+        minimum_confidence,
+        expected_part=expected_part,
+        exclude_serial=exclude_serial,
+    )
+    result = matches.get(check_type, {"value": "", "confidence": 0.0, "variant": ""})
+    return result["value"], result["confidence"], result["variant"]
 
 
 def run_worker() -> None:
@@ -411,20 +612,38 @@ def run_worker() -> None:
             if image is None:
                 raise ValueError("The image could not be decoded.")
             check_type = str(request.get("check_type", "serial"))
-            value, confidence, variant = read_typed_value(
+            check_types = request.get("check_types")
+            if not isinstance(check_types, list) or not check_types:
+                check_types = ["serial", "part", "weight"]
+            if check_type not in check_types:
+                check_types.append(check_type)
+            expected_part = request.get("expected_part")
+            exclude_serial = request.get("exclude_serial")
+
+            multi_results = read_multi_values(
                 reader,
                 image,
-                check_type,
+                check_types,
                 minimum_confidence=float(request.get("minimum_confidence", 0.30)),
+                expected_part=str(expected_part) if expected_part else None,
+                exclude_serial=str(exclude_serial) if exclude_serial else None,
             )
+            primary = multi_results.get(
+                check_type, {"value": "", "confidence": 0.0, "variant": ""}
+            )
+            detected_values = {
+                k: v["value"] or None for k, v in multi_results.items()
+            }
+            has_any = any(v["value"] for v in multi_results.values())
             response = {
                 "id": request["id"],
-                "detected": bool(value),
-                "value": value or None,
-                "serial_number": value or None,
+                "detected": bool(primary["value"]) or has_any,
+                "value": primary["value"] or None,
+                "serial_number": multi_results.get("serial", {}).get("value") or None,
                 "check_type": check_type,
-                "confidence": round(confidence, 4),
-                "enhancement": variant if value else None,
+                "confidence": round(primary["confidence"], 4),
+                "enhancement": primary["variant"] if primary["value"] else None,
+                "values": detected_values,
             }
         except Exception as error:
             response = {

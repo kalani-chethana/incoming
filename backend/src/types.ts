@@ -30,6 +30,7 @@ export interface OcrResult {
   check_type: "serial" | "part" | "weight";
   confidence: number;
   enhancement: string | null;
+  values?: Record<string, string | null>;
 }
 
 export interface SessionRecord {
