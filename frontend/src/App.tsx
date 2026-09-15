@@ -30,6 +30,37 @@ function App() {
   const [finished, setFinished] = useState(false);
   const [savedSession, setSavedSession] = useState(null);
   const [saveError, setSaveError] = useState("");
+  const [autoCapture, setAutoCapture] = useState(true);
+  const [captureFlash, setCaptureFlash] = useState(false);
+  const cooldownRef = useRef(0);
+
+  function playSuccessChime() {
+    try {
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.12);
+      gain.gain.setValueAtTime(0.12, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.14);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.15);
+    } catch {
+      // Audio might be blocked if user has not interacted with page yet
+    }
+  }
+
+  function triggerSuccessFeedback() {
+    setCaptureFlash(true);
+    setTimeout(() => setCaptureFlash(false), 800);
+    cooldownRef.current = Date.now() + 1500;
+    playSuccessChime();
+  }
 
   const steps = CHECKS.filter((check) => selected[check.id]);
   const currentStep = steps[stepIndex];
@@ -126,7 +157,7 @@ function App() {
     return payload || {};
   }
 
-  async function readImage(image) {
+  async function readImage(image, isAuto = false) {
     if (!image || !currentStep) return;
     setIsReading(true);
     setSaveError("");
@@ -181,6 +212,12 @@ function App() {
       }
 
       const value = detectedValues[currentStep.id] || null;
+
+      // In Auto-capture mode, silently ignore frames with no detection
+      if (isAuto && !value) {
+        return;
+      }
+
       const attempt = attemptCount + 1;
 
       let extraSummary = "";
@@ -193,6 +230,11 @@ function App() {
       if (!value && attempt < 3) {
         setAttemptCount(attempt);
         return;
+      }
+
+      // Visual flash & chime on successful detection
+      if (value) {
+        triggerSuccessFeedback();
       }
 
       setAttemptCount(0);
@@ -237,27 +279,48 @@ function App() {
         finishPiece(nextPiece);
       }
     } catch (error) {
-      setSaveError(
-        error instanceof TypeError
-          ? "Cannot reach the OCR server. Please check backend connection."
-          : error instanceof Error
-          ? error.message
-          : "An unexpected error occurred."
-      );
+      if (!isAuto) {
+        setSaveError(
+          error instanceof TypeError
+            ? "Cannot reach the OCR server. Please check backend connection."
+            : error instanceof Error
+            ? error.message
+            : "An unexpected error occurred."
+        );
+      }
     } finally {
       setIsReading(false);
     }
   }
 
   async function captureAndRead() {
-    await readImage(await capturePhoto());
+    await readImage(await capturePhoto(), false);
   }
 
   async function uploadAndRead(event) {
     const image = event.target.files?.[0];
     event.target.value = "";
-    if (image) await readImage(image);
+    if (image) await readImage(image, false);
   }
+
+  useEffect(() => {
+    if (!autoCapture || !started || finished || !cameraReady || isReading) return;
+    let active = true;
+    const interval = setInterval(async () => {
+      if (!active) return;
+      if (Date.now() < cooldownRef.current) return;
+      if (isReading) return;
+      const photo = await capturePhoto();
+      if (photo && active) {
+        await readImage(photo, true);
+      }
+    }, 1200);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [autoCapture, started, finished, cameraReady, isReading, currentStep, piece, steps]);
 
   async function finishSession() {
     setSaveError("");
@@ -294,7 +357,8 @@ function App() {
   function reset() {
     setFinished(false); setSavedSession(null); setReadings([]); setResult(null);
     setPiece({}); setStepIndex(0); setRangeStart(""); setRangeEnd("");
-    setAttemptCount(0);
+    setAttemptCount(0); setCaptureFlash(false);
+    cooldownRef.current = 0;
     setExpectedPart(""); setExpectedWeight("");
     setCameraReady(false); setCameraError("");
     setStarted(false);
@@ -378,14 +442,51 @@ function App() {
           })}
         </div>
         {started && <><div className="panel-heading camera-heading"><div><h2>Camera view</h2><span className="step">{currentStep?.label}</span></div></div>
-        <div className="step-banner">{`Place the ${currentStep?.label?.toLowerCase()} in the camera view · Attempt ${attemptCount + 1} of 3`}</div>
-        <div className="camera-view">
-          {!finished ? <video ref={videoRef} autoPlay playsInline muted onCanPlay={() => setCameraReady(true)} /> :
-            <div className="camera-message">{finished ? "Session finished" : "Select checks and enter required values."}</div>}
+        <div className="capture-mode-bar">
+          <label className="auto-capture-toggle">
+            <input
+              type="checkbox"
+              checked={autoCapture}
+              onChange={(e) => setAutoCapture(e.target.checked)}
+            />
+            <span className="toggle-switch"></span>
+            <span className="toggle-text">Auto-capture (Hands-free)</span>
+          </label>
+          {autoCapture && (
+            <span className="auto-badge">
+              <span className="live-dot"></span>
+              Auto-scanning live
+            </span>
+          )}
+        </div>
+        <div className="step-banner">
+          {autoCapture
+            ? `Hold the ${currentStep?.label?.toLowerCase()} steadily in camera view for auto-capture`
+            : `Place the ${currentStep?.label?.toLowerCase()} in the camera view · Attempt ${attemptCount + 1} of 3`}
+        </div>
+        <div className={`camera-view ${captureFlash ? "capture-flash" : ""}`}>
+          {!finished ? (
+            <>
+              <video ref={videoRef} autoPlay playsInline muted onCanPlay={() => setCameraReady(true)} />
+              {autoCapture && cameraReady && !isReading && <div className="scan-laser-line"></div>}
+              {captureFlash && (
+                <div className="capture-flash-overlay">
+                  <span>✓ Captured</span>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="camera-message">{finished ? "Session finished" : "Select checks and enter required values."}</div>
+          )}
           {cameraError && <div className="camera-message">{cameraError}</div>}
         </div>
         <button className="primary-button" disabled={!configurationReady || finished || isReading || !cameraReady} onClick={captureAndRead}>
-          <ScanIcon />{isReading ? "Reading…" : `Capture ${currentStep?.label || ""}`}
+          <ScanIcon />
+          {isReading
+            ? "Reading…"
+            : autoCapture
+            ? `Capture now (Manual click)`
+            : `Capture ${currentStep?.label || ""}`}
         </button>
         <label className={`upload-button ${finished || isReading ? "disabled" : ""}`}>
           <input
