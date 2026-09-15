@@ -106,6 +106,21 @@ function App() {
     setAttemptCount(0);
   }
 
+  async function parseJsonResponse(response, defaultError) {
+    const text = await response.text();
+    let payload = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      payload = null;
+    }
+    if (!response.ok) {
+      const message = payload?.detail || payload?.error || (text && text.length < 200 ? text : null) || `${defaultError} (HTTP ${response.status})`;
+      throw new Error(message);
+    }
+    return payload || {};
+  }
+
   async function readImage(image) {
     if (!image || !currentStep) return;
     setIsReading(true);
@@ -114,8 +129,7 @@ function App() {
       const form = new FormData();
       form.append("image", image);
       const response = await fetch(`/api/read-serial?check_type=${currentStep.id}&minimum_confidence=0.30`, { method: "POST", body: form });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.detail || "OCR failed.");
+      const payload = await parseJsonResponse(response, "OCR failed");
       const value = payload.value || null;
       const attempt = attemptCount + 1;
       setResult({ type: currentStep.id, value, attempt });
@@ -129,7 +143,11 @@ function App() {
       if (stepIndex === steps.length - 1) finishPiece(nextPiece);
       else setStepIndex((index) => index + 1);
     } catch (error) {
-      setSaveError(error instanceof TypeError ? "Cannot reach the OCR server." : error.message);
+      setSaveError(
+        error instanceof TypeError
+          ? "Cannot reach the OCR server. Please check backend connection."
+          : error.message || "An unexpected error occurred."
+      );
     } finally {
       setIsReading(false);
     }
@@ -158,10 +176,15 @@ function App() {
           readings: readings.slice().reverse(),
         }),
       });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.detail || "Session could not be saved.");
+      const payload = await parseJsonResponse(response, "Session could not be saved");
       setSavedSession(payload); setFinished(true);
-    } catch (error) { setSaveError(error.message); }
+    } catch (error) {
+      setSaveError(
+        error instanceof TypeError
+          ? "Cannot reach the database server. Please check backend connection."
+          : error.message || "Session could not be saved."
+      );
+    }
   }
 
   async function downloadReport() {
