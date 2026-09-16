@@ -53,6 +53,9 @@ function App() {
   const [readings, setReadings] = useState<ReadingRow[]>([]);
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraError, setCameraError] = useState("");
+  const [cameraRetryCount, setCameraRetryCount] = useState(0);
+  const [availableCameras, setAvailableCameras] = useState<{ deviceId: string; label: string }[]>([]);
+  const [selectedCameraId, setSelectedCameraId] = useState<string>("");
   const [isReading, setIsReading] = useState(false);
   const [finished, setFinished] = useState(false);
   const [savedSession, setSavedSession] = useState<{ session_id: string } | null>(null);
@@ -99,28 +102,134 @@ function App() {
     (!selected.weight || expectedWeight.trim());
 
   useEffect(() => {
-    if (!started || !configurationReady || finished) return;
+    if (!started || !configurationReady || finished) {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+      setCameraReady(false);
+      return;
+    }
+
+    // Secure Context check (HTTPS or localhost required for camera access)
+    const isLocalhost =
+      window.location.hostname === "localhost" ||
+      window.location.hostname === "127.0.0.1" ||
+      window.location.hostname === "[::1]";
+
+    if (!window.isSecureContext && !isLocalhost) {
+      setCameraError(
+        "Camera blocked: Browsers require HTTPS (or localhost). When connecting over Wi-Fi/LAN (e.g. 192.168.x.x), please open via http://localhost:5173 or run with HTTPS."
+      );
+      setCameraReady(false);
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraError("Camera API is not supported in this browser. Please use Chrome, Edge, or Firefox.");
+      setCameraReady(false);
+      return;
+    }
+
     let cancelled = false;
-    navigator.mediaDevices?.getUserMedia({
-      video: { facingMode: { ideal: "environment" } }, audio: false,
-    }).then((stream) => {
-      if (cancelled) return stream.getTracks().forEach((track) => track.stop());
-      streamRef.current = stream;
-      if (videoRef.current) videoRef.current.srcObject = stream;
-    }).catch((error) => {
-      const messages: Record<string, string> = {
-        NotAllowedError: "Camera permission is blocked in browser settings.",
-        NotFoundError: "No camera device was detected.",
-        NotReadableError: "The camera is currently used by another application.",
+    let retryTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    async function initCamera(isRetry = false) {
+      setCameraError("");
+
+      const primaryConstraints: MediaStreamConstraints = {
+        audio: false,
+        video: selectedCameraId
+          ? { deviceId: { exact: selectedCameraId } }
+          : {
+              facingMode: { ideal: "environment" },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+            },
       };
-      setCameraError(messages[error.name] || "The camera could not be started.");
-    });
+
+      const fallbackConstraints: MediaStreamConstraints = {
+        audio: false,
+        video: true,
+      };
+
+      let stream: MediaStream | null = null;
+      try {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(primaryConstraints);
+        } catch (constraintError) {
+          console.warn("Primary camera constraints failed, attempting fallback:", constraintError);
+          stream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+        }
+      } catch (err: unknown) {
+        if (cancelled) return;
+        const error = err as { name?: string; message?: string };
+
+        // Handle temporary Windows hardware locks during React StrictMode mount/unmount cycles
+        if (error.name === "NotReadableError" && !isRetry) {
+          retryTimeout = setTimeout(() => {
+            if (!cancelled) initCamera(true);
+          }, 600);
+          return;
+        }
+
+        const messages: Record<string, string> = {
+          NotAllowedError: "Camera permission is blocked in browser settings. Please click the lock/camera icon in your address bar and allow camera access.",
+          NotFoundError: "No camera device was detected. Please connect a webcam or USB camera.",
+          NotReadableError: "The camera is currently used by another application (e.g. Teams, Zoom, or another browser tab). Please close it and click Retry.",
+          OverconstrainedError: "The requested camera settings could not be satisfied by your camera hardware.",
+        };
+        setCameraError(messages[error.name || ""] || `Camera could not be started: ${error.message || error.name || "Unknown error"}`);
+        setCameraReady(false);
+        return;
+      }
+
+      if (cancelled) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+      }
+      streamRef.current = stream;
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        try {
+          await videoRef.current.play();
+        } catch (playError) {
+          console.warn("Video play() pending interaction:", playError);
+        }
+        setCameraReady(true);
+      }
+
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoInputs = devices
+          .filter((d) => d.kind === "videoinput")
+          .map((d, index) => ({
+            deviceId: d.deviceId,
+            label: d.label || `Camera ${index + 1}`,
+          }));
+        setAvailableCameras(videoInputs);
+      } catch {
+        // Enumerate devices is optional
+      }
+    }
+
+    initCamera();
+
     return () => {
       cancelled = true;
-      streamRef.current?.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
+      if (retryTimeout) clearTimeout(retryTimeout);
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+      setCameraReady(false);
     };
-  }, [started, configurationReady, finished]);
+  }, [started, configurationReady, finished, selectedCameraId, cameraRetryCount]);
 
   function normalize(value: string) {
     return value.trim().toUpperCase().replace(/[_–—\s]+/g, "-");
@@ -429,18 +538,26 @@ function App() {
           </div>
           <div className="flex items-center gap-2 text-xs font-semibold">
             <span
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border ${cameraReady
-                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                  : started
-                    ? "bg-amber-50 text-amber-700 border-amber-200"
-                    : "bg-slate-100 text-slate-600 border-slate-200"
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border ${cameraError
+                  ? "bg-rose-50 text-rose-700 border-rose-200"
+                  : cameraReady
+                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                    : started
+                      ? "bg-amber-50 text-amber-700 border-amber-200"
+                      : "bg-slate-100 text-slate-600 border-slate-200"
                 }`}
             >
               <span
-                className={`w-2 h-2 rounded-full ${cameraReady ? "bg-emerald-500 animate-pulse" : started ? "bg-amber-500" : "bg-slate-400"
+                className={`w-2 h-2 rounded-full ${cameraError
+                    ? "bg-rose-500"
+                    : cameraReady
+                      ? "bg-emerald-500 animate-pulse"
+                      : started
+                        ? "bg-amber-500"
+                        : "bg-slate-400"
                   }`}
               ></span>
-              {cameraReady ? "Camera Live" : started ? "Connecting Camera…" : "System Ready"}
+              {cameraError ? "Camera Error" : cameraReady ? "Camera Live" : started ? "Connecting Camera…" : "System Ready"}
             </span>
           </div>
         </header>
@@ -647,6 +764,7 @@ function App() {
                   setStarted(true);
                   setCameraReady(false);
                   setCameraError("");
+                  setCameraRetryCount((c) => c + 1);
                 }}
                 className="w-full py-3.5 px-6 rounded-2xl bg-lime-500 hover:bg-lime-400 active:scale-[0.99] text-slate-950 font-bold text-sm tracking-wide transition shadow-lg shadow-lime-500/20 disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
               >
@@ -666,9 +784,26 @@ function App() {
                     <h2 className="text-base font-bold text-slate-900">Camera View</h2>
                     <p className="text-xs text-slate-500">Live optical inspection station</p>
                   </div>
-                  <span className="px-3 py-1 rounded-full text-xs font-bold bg-lime-100 text-lime-900 border border-lime-300/80">
-                    Active: {currentStep?.label}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    {availableCameras.length > 1 && (
+                      <select
+                        id="camera-device-select"
+                        value={selectedCameraId}
+                        onChange={(e) => setSelectedCameraId(e.target.value)}
+                        className="text-xs bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-800 rounded-lg px-2.5 py-1 focus:outline-none focus:ring-2 focus:ring-lime-500 transition cursor-pointer"
+                        title="Select Camera Device"
+                      >
+                        {availableCameras.map((cam) => (
+                          <option key={cam.deviceId} value={cam.deviceId}>
+                            {cam.label}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    <span className="px-3 py-1 rounded-full text-xs font-bold bg-lime-100 text-lime-900 border border-lime-300/80">
+                      Active: {currentStep?.label}
+                    </span>
+                  </div>
                 </div>
 
                 {/* Auto-Capture Toggle Bar */}
@@ -712,6 +847,10 @@ function App() {
                         playsInline
                         muted
                         onCanPlay={() => setCameraReady(true)}
+                        onLoadedMetadata={() => {
+                          videoRef.current?.play().catch(() => {});
+                          setCameraReady(true);
+                        }}
                         className="w-full h-full object-cover"
                       />
                       {autoCapture && cameraReady && !isReading && <div className="scan-laser-line"></div>}
@@ -727,8 +866,24 @@ function App() {
                     <div className="text-slate-400 text-xs font-semibold">Inspection session finished</div>
                   )}
                   {cameraError && (
-                    <div className="absolute inset-x-4 bottom-4 bg-rose-900/90 text-white text-xs p-3 rounded-xl backdrop-blur-sm border border-rose-700">
-                      {cameraError}
+                    <div className="absolute inset-x-4 bottom-4 bg-rose-950/95 text-white text-xs p-3.5 rounded-xl backdrop-blur-md border border-rose-500/80 shadow-xl flex items-center justify-between gap-3 z-10">
+                      <div className="flex items-start gap-2">
+                        <span className="text-rose-400 font-bold text-sm">⚠</span>
+                        <div className="space-y-0.5">
+                          <p className="font-semibold text-rose-100">Camera Connection Failed</p>
+                          <p className="text-rose-200/90 text-[11px] leading-snug">{cameraError}</p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCameraError("");
+                          setCameraRetryCount((c) => c + 1);
+                        }}
+                        className="shrink-0 px-3 py-1.5 bg-rose-500 hover:bg-rose-400 active:scale-95 text-white font-bold rounded-lg text-xs transition shadow-sm cursor-pointer"
+                      >
+                        Retry
+                      </button>
                     </div>
                   )}
                 </div>

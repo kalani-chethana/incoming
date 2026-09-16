@@ -18,14 +18,15 @@ MODEL_DIRECTORY = PROJECT_DIRECTORY / "models" / "paddleocr"
 
 
 def create_ocr_reader() -> Any:
-    """Create PaddleOCR using the project-local models."""
+    """Create PaddleOCR using the project-local models with hardware acceleration."""
     from paddleocr import PaddleOCR
 
     return PaddleOCR(
         lang="en",
         use_angle_cls=False,
         use_gpu=False,
-        enable_mkldnn=False,
+        enable_mkldnn=True,
+        cpu_threads=4,
         show_log=False,
         det_model_dir=str(MODEL_DIRECTORY / "en_PP-OCRv3_det_infer"),
         rec_model_dir=str(MODEL_DIRECTORY / "en_PP-OCRv3_rec_infer"),
@@ -35,7 +36,12 @@ def create_ocr_reader() -> Any:
 
 def preprocess_image(image: np.ndarray) -> list[tuple[str, np.ndarray]]:
     """Create normal and glare-resistant variants for engraved metal text."""
-    enlarged = cv2.resize(image, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    height, width = image.shape[:2]
+
+    # Smart scale: avoid blowing up already high-res 1080p images into 4K/5K
+    full_scale = 1.2 if max(height, width) >= 1200 else (1.5 if max(height, width) >= 800 else 2.0)
+    enlarged = cv2.resize(image, None, fx=full_scale, fy=full_scale, interpolation=cv2.INTER_CUBIC) if full_scale != 1.0 else image
+
     gray = cv2.cvtColor(enlarged, cv2.COLOR_BGR2GRAY)
     enhanced = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(gray)
     blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
@@ -47,65 +53,71 @@ def preprocess_image(image: np.ndarray) -> list[tuple[str, np.ndarray]]:
         31,
         5,
     )
-    variants = [
-        ("Original", enlarged),
-        ("Enhanced", enhanced),
-        ("Binary", binary),
-    ]
 
     # Operators place the engraved area near the center. A tighter crop makes
     # small text occupy more pixels and removes most of the empty background.
-    height, width = image.shape[:2]
     center = image[
         int(height * 0.16):int(height * 0.82),
         int(width * 0.18):int(width * 0.82),
     ]
-    if not center.size:
-        return variants
 
-    center_large = cv2.resize(
-        center, None, fx=4.0, fy=4.0, interpolation=cv2.INTER_CUBIC
-    )
-    center_gray = cv2.cvtColor(center_large, cv2.COLOR_BGR2GRAY)
-    center_enhanced = cv2.createCLAHE(
-        clipLimit=3.2, tileGridSize=(8, 8)
-    ).apply(center_gray)
-    center_soft = cv2.GaussianBlur(center_enhanced, (0, 0), 1.1)
-    center_sharp = cv2.addWeighted(
-        center_enhanced, 2.0, center_soft, -1.0, 0
-    )
-    center_binary = cv2.adaptiveThreshold(
-        center_sharp,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        31,
-        6,
-    )
+    center_variants: list[tuple[str, np.ndarray]] = []
+    if center.size:
+        # Scale center crop smartly (target ~1800px wide, instead of 5000px)
+        c_scale = min(2.5, max(1.2, 1800.0 / max(center.shape[1], 1)))
+        center_large = cv2.resize(
+            center, None, fx=c_scale, fy=c_scale, interpolation=cv2.INTER_CUBIC
+        ) if c_scale != 1.0 else center
 
-    # Black-hat and top-hat isolate shallow grooves under uneven reflections:
-    # one favors dark edges and the other favors bright edges.
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (35, 9))
-    dark_grooves = cv2.morphologyEx(
-        center_sharp, cv2.MORPH_BLACKHAT, kernel
-    )
-    bright_grooves = cv2.morphologyEx(
-        center_sharp, cv2.MORPH_TOPHAT, kernel
-    )
-    dark_grooves = cv2.normalize(
-        dark_grooves, None, 0, 255, cv2.NORM_MINMAX
-    )
-    bright_grooves = cv2.normalize(
-        bright_grooves, None, 0, 255, cv2.NORM_MINMAX
-    )
-    variants.extend([
-        ("Center enhanced", center_enhanced),
-        ("Center sharpened", center_sharp),
-        ("Center binary", center_binary),
-        ("Center inverted", cv2.bitwise_not(center_binary)),
-        ("Dark grooves", cv2.bitwise_not(dark_grooves)),
-        ("Bright grooves", cv2.bitwise_not(bright_grooves)),
-    ])
+        center_gray = cv2.cvtColor(center_large, cv2.COLOR_BGR2GRAY)
+        center_enhanced = cv2.createCLAHE(
+            clipLimit=3.2, tileGridSize=(8, 8)
+        ).apply(center_gray)
+        center_soft = cv2.GaussianBlur(center_enhanced, (0, 0), 1.1)
+        center_sharp = cv2.addWeighted(
+            center_enhanced, 2.0, center_soft, -1.0, 0
+        )
+        center_binary = cv2.adaptiveThreshold(
+            center_sharp,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            6,
+        )
+
+        # Black-hat and top-hat isolate shallow grooves under uneven reflections:
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (35, 9))
+        dark_grooves = cv2.morphologyEx(
+            center_sharp, cv2.MORPH_BLACKHAT, kernel
+        )
+        bright_grooves = cv2.morphologyEx(
+            center_sharp, cv2.MORPH_TOPHAT, kernel
+        )
+        dark_grooves = cv2.normalize(
+            dark_grooves, None, 0, 255, cv2.NORM_MINMAX
+        )
+        bright_grooves = cv2.normalize(
+            bright_grooves, None, 0, 255, cv2.NORM_MINMAX
+        )
+
+        # High-probability center variants first for fast early exit
+        center_variants = [
+            ("Center enhanced", center_enhanced),
+            ("Center sharpened", center_sharp),
+            ("Center binary", center_binary),
+            ("Dark grooves", cv2.bitwise_not(dark_grooves)),
+            ("Bright grooves", cv2.bitwise_not(bright_grooves)),
+        ]
+
+    # Prioritize enhanced center and clean full-frame variants first
+    variants = [
+        *([v for v in center_variants if "enhanced" in v[0] or "sharpened" in v[0]]),
+        ("Enhanced", enhanced),
+        ("Original", enlarged),
+        *([v for v in center_variants if "enhanced" not in v[0] and "sharpened" not in v[0]]),
+        ("Binary", binary),
+    ]
     return variants
 
 
@@ -452,6 +464,8 @@ def read_serial_number(
             best_confidence = confidence
             best_variant = variant_name
             best_image = processed_image
+            if confidence >= 0.85 and len(re.sub(r"\D", "", number)) >= MINIMUM_SERIAL_LENGTH:
+                break
 
     return best_number, best_confidence, best_variant, best_image
 
@@ -464,7 +478,7 @@ def read_multi_values(
     expected_part: str | None = None,
     exclude_serial: str | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Extract multiple check types (serial, weight, part) in a single OCR pass."""
+    """Extract multiple check types (serial, weight, part) with early-exit optimization."""
     targets = set(check_types)
     best_matches: dict[str, dict[str, Any]] = {
         ct: {"value": "", "confidence": 0.0, "variant": ""}
@@ -475,11 +489,17 @@ def read_multi_values(
         re.sub(r"\D", "", expected_part) if expected_part else None
     )
 
-    # Pass 1: Extract serial and weight across variants
+    exclude_digits: set[str] = set()
+    if exclude_serial:
+        exclude_digits.add(re.sub(r"\D", "", exclude_serial))
+    if expected_part_digits:
+        exclude_digits.discard(expected_part_digits)
+
     all_variant_results: list[tuple[str, list[tuple[Any, str, float]]]] = []
     for variant_name, processed_image in preprocess_image(image):
         results = _extract_results(reader.ocr(processed_image, cls=False))
         all_variant_results.append((variant_name, results))
+
         if "serial" in targets:
             serial_val, serial_conf = _extract_serial_from_results(
                 results, minimum_confidence, expected_part_digits=expected_part_digits
@@ -490,6 +510,10 @@ def read_multi_values(
                     "confidence": serial_conf,
                     "variant": variant_name,
                 }
+                s_digs = re.sub(r"\D", "", serial_val)
+                if s_digs and s_digs != expected_part_digits:
+                    exclude_digits.add(s_digs)
+
         if "weight" in targets or "serial" in targets:
             val, conf = _extract_pattern_from_results(
                 results, "weight", minimum_confidence
@@ -501,21 +525,7 @@ def read_multi_values(
                     "variant": variant_name,
                 }
 
-    # Pass 2: Extract part, strictly excluding digits of the known serial
-    if "part" in targets:
-        exclude_digits: set[str] = set()
-        if exclude_serial:
-            exclude_digits.add(re.sub(r"\D", "", exclude_serial))
-        detected_serial = best_matches["serial"]["value"]
-        if detected_serial:
-            s_digs = re.sub(r"\D", "", detected_serial)
-            if s_digs and s_digs != expected_part_digits:
-                exclude_digits.add(s_digs)
-
-        if expected_part_digits:
-            exclude_digits.discard(expected_part_digits)
-
-        for variant_name, results in all_variant_results:
+        if "part" in targets:
             val, conf = _extract_pattern_from_results(
                 results,
                 "part",
@@ -523,57 +533,76 @@ def read_multi_values(
                 exclude_digits=exclude_digits,
                 expected_value=expected_part,
             )
-            if not val:
-                continue
+            if val:
+                cur_digits = re.sub(r"\D", "", val)
+                best_val = best_matches["part"]["value"]
+                best_digits = re.sub(r"\D", "", best_val) if best_val else ""
 
-            cur_digits = re.sub(r"\D", "", val)
-            best_val = best_matches["part"]["value"]
-            best_digits = re.sub(r"\D", "", best_val) if best_val else ""
+                cur_matches_exp = (
+                    (cur_digits == expected_part_digits)
+                    if expected_part_digits
+                    else False
+                )
+                best_matches_exp = (
+                    (best_digits == expected_part_digits)
+                    if expected_part_digits and best_val
+                    else False
+                )
 
-            cur_matches_exp = (
-                (cur_digits == expected_part_digits)
-                if expected_part_digits
-                else False
+                if cur_matches_exp and not best_matches_exp:
+                    is_better = True
+                elif not cur_matches_exp and best_matches_exp:
+                    is_better = False
+                elif len(cur_digits) > len(best_digits):
+                    is_better = True
+                elif len(cur_digits) < len(best_digits):
+                    is_better = False
+                else:
+                    is_better = conf > best_matches["part"]["confidence"]
+
+                if is_better:
+                    best_matches["part"] = {
+                        "value": val,
+                        "confidence": conf,
+                        "variant": variant_name,
+                    }
+
+        # Early exit check: stop as soon as active step targets are satisfied
+        serial_ok = ("serial" not in targets) or (
+            bool(best_matches["serial"]["value"])
+            and len(re.sub(r"\D", "", best_matches["serial"]["value"])) >= MINIMUM_SERIAL_LENGTH
+            and best_matches["serial"]["confidence"] >= 0.55
+        )
+        part_ok = ("part" not in targets) or (
+            bool(best_matches["part"]["value"])
+            and (
+                (expected_part_digits and re.sub(r"\D", "", best_matches["part"]["value"]) == expected_part_digits)
+                or (not expected_part_digits and best_matches["part"]["confidence"] >= 0.55)
             )
-            best_matches_exp = (
-                (best_digits == expected_part_digits)
-                if expected_part_digits and best_val
-                else False
-            )
+        )
+        weight_ok = ("weight" not in targets) or (
+            bool(best_matches["weight"]["value"])
+            and best_matches["weight"]["confidence"] >= 0.55
+        )
 
-            if cur_matches_exp and not best_matches_exp:
-                is_better = True
-            elif not cur_matches_exp and best_matches_exp:
-                is_better = False
-            elif len(cur_digits) > len(best_digits):
-                is_better = True
-            elif len(cur_digits) < len(best_digits):
-                is_better = False
-            else:
-                is_better = conf > best_matches["part"]["confidence"]
+        if serial_ok and part_ok and weight_ok:
+            break
 
-            if is_better:
-                best_matches["part"] = {
-                    "value": val,
-                    "confidence": conf,
-                    "variant": variant_name,
-                }
-
-        # Final check: if nothing was selected yet and expected_part is set,
-        # do a targeted search for expected_part_digits across all OCR results
-        if not best_matches["part"]["value"] and expected_part_digits:
-            for variant_name, results in all_variant_results:
-                for _, text, conf in results:
-                    clean = re.sub(r"\D", "", text)
-                    if expected_part_digits in clean or clean == expected_part_digits:
-                        best_matches["part"] = {
-                            "value": expected_part.strip(),
-                            "confidence": max(conf, 0.95),
-                            "variant": variant_name,
-                        }
-                        break
-                if best_matches["part"]["value"]:
+    # Final check: if nothing was selected yet and expected_part is set,
+    # do a targeted search for expected_part_digits across all OCR results
+    if "part" in targets and not best_matches["part"]["value"] and expected_part_digits:
+        for variant_name, results in all_variant_results:
+            for _, text, conf in results:
+                clean = re.sub(r"\D", "", text)
+                if expected_part_digits in clean or clean == expected_part_digits:
+                    best_matches["part"] = {
+                        "value": expected_part.strip(),
+                        "confidence": max(conf, 0.95),
+                        "variant": variant_name,
+                    }
                     break
+            if best_matches["part"]["value"]:
+                break
 
     return best_matches
 
