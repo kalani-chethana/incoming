@@ -5,7 +5,7 @@ import path from "node:path";
 import readline from "node:readline";
 
 import { config } from "./config.js";
-import type { OcrResult } from "./types.js";
+import type { OcrResult } from "../types/serialnumber.types.js";
 
 interface WorkerResponse extends OcrResult {
   id: string;
@@ -25,7 +25,7 @@ class OcrClient {
 
   private startWorker(): ChildProcessWithoutNullStreams {
     if (this.worker && !this.worker.killed) return this.worker;
-    const workerPath = path.join(config.backendDirectory, "ocr_worker.py");
+    const workerPath = config.ocrWorkerPath;
     this.worker = spawn(config.pythonExecutable, [workerPath], {
       cwd: config.projectDirectory,
       stdio: ["pipe", "pipe", "pipe"],
@@ -62,7 +62,10 @@ class OcrClient {
     checkType = "serial",
     options: {
       checkTypes?: string[];
+      rangeStart?: string;
+      rangeEnd?: string;
       expectedPart?: string;
+      expectedWeight?: string;
       excludeSerial?: string;
     } = {}
   ): Promise<OcrResult> {
@@ -81,7 +84,10 @@ class OcrClient {
         minimum_confidence: minimumConfidence,
         check_type: checkType,
         check_types: options.checkTypes || ["serial", "part", "weight"],
+        range_start: options.rangeStart || null,
+        range_end: options.rangeEnd || null,
         expected_part: options.expectedPart || null,
+        expected_weight: options.expectedWeight || null,
         exclude_serial: options.excludeSerial || null,
       })}\n`);
       return await result;
@@ -92,3 +98,5 @@ class OcrClient {
 }
 
 export const ocrClient = new OcrClient();
+export default ocrClient;
+

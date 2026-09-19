@@ -38,12 +38,12 @@ def preprocess_image(image: np.ndarray) -> list[tuple[str, np.ndarray]]:
     """Create normal and glare-resistant variants for engraved metal text."""
     height, width = image.shape[:2]
 
-    # Smart scale: avoid blowing up already high-res 1080p images into 4K/5K
+    # Scale only if needed for low-resolution images
     full_scale = 1.2 if max(height, width) >= 1200 else (1.5 if max(height, width) >= 800 else 2.0)
-    enlarged = cv2.resize(image, None, fx=full_scale, fy=full_scale, interpolation=cv2.INTER_CUBIC) if full_scale != 1.0 else image
+    enlarged = cv2.resize(image, None, fx=full_scale, fy=full_scale, interpolation=cv2.INTER_LINEAR) if full_scale != 1.0 else image
 
     gray = cv2.cvtColor(enlarged, cv2.COLOR_BGR2GRAY)
-    enhanced = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(gray)
+    enhanced = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
     blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
     binary = cv2.adaptiveThreshold(
         blurred,
@@ -54,8 +54,7 @@ def preprocess_image(image: np.ndarray) -> list[tuple[str, np.ndarray]]:
         5,
     )
 
-    # Operators place the engraved area near the center. A tighter crop makes
-    # small text occupy more pixels and removes most of the empty background.
+    # Operators place the engraved area near the center.
     center = image[
         int(height * 0.16):int(height * 0.82),
         int(width * 0.18):int(width * 0.82),
@@ -63,19 +62,13 @@ def preprocess_image(image: np.ndarray) -> list[tuple[str, np.ndarray]]:
 
     center_variants: list[tuple[str, np.ndarray]] = []
     if center.size:
-        # Scale center crop smartly (target ~1800px wide, instead of 5000px)
-        c_scale = min(2.5, max(1.2, 1800.0 / max(center.shape[1], 1)))
-        center_large = cv2.resize(
-            center, None, fx=c_scale, fy=c_scale, interpolation=cv2.INTER_CUBIC
-        ) if c_scale != 1.0 else center
-
-        center_gray = cv2.cvtColor(center_large, cv2.COLOR_BGR2GRAY)
+        center_gray = cv2.cvtColor(center, cv2.COLOR_BGR2GRAY)
         center_enhanced = cv2.createCLAHE(
-            clipLimit=3.2, tileGridSize=(8, 8)
+            clipLimit=2.0, tileGridSize=(8, 8)
         ).apply(center_gray)
         center_soft = cv2.GaussianBlur(center_enhanced, (0, 0), 1.1)
         center_sharp = cv2.addWeighted(
-            center_enhanced, 2.0, center_soft, -1.0, 0
+            center_enhanced, 1.5, center_soft, -0.5, 0
         )
         center_binary = cv2.adaptiveThreshold(
             center_sharp,
@@ -101,23 +94,26 @@ def preprocess_image(image: np.ndarray) -> list[tuple[str, np.ndarray]]:
             bright_grooves, None, 0, 255, cv2.NORM_MINMAX
         )
 
-        # High-probability center variants first for fast early exit
         center_variants = [
+            ("Center original", center),
+            ("Center binary", center_binary),
             ("Center enhanced", center_enhanced),
             ("Center sharpened", center_sharp),
-            ("Center binary", center_binary),
             ("Dark grooves", cv2.bitwise_not(dark_grooves)),
             ("Bright grooves", cv2.bitwise_not(bright_grooves)),
         ]
 
-    # Prioritize enhanced center and clean full-frame variants first
-    variants = [
-        *([v for v in center_variants if "enhanced" in v[0] or "sharpened" in v[0]]),
+    # Prioritize clean original camera images first so real spaces and dashes are preserved
+    raw_variants: list[tuple[str, np.ndarray] | None] = [
+        ("Original", image),
+        ("Center original", center) if center.size else None,
+        ("Original enlarged", enlarged) if full_scale != 1.0 else None,
+        *([v for v in center_variants if v[0] != "Center original"]),
         ("Enhanced", enhanced),
-        ("Original", enlarged),
-        *([v for v in center_variants if "enhanced" not in v[0] and "sharpened" not in v[0]]),
         ("Binary", binary),
     ]
+    variants = [v for v in raw_variants if v is not None]
+    return variants
     return variants
 
 
@@ -369,10 +365,8 @@ def _extract_pattern_from_results(
         for start in range(len(row)):
             for end in range(start + 2, len(row) + 1):
                 section = row[start:end]
-                combined = "".join(item[1].strip() for item in section)
                 spaced = " ".join(item[1].strip() for item in section)
                 confidence = sum(item[2] for item in section) / len(section)
-                candidates.append((combined, confidence))
                 candidates.append((spaced, confidence))
 
     best_value, best_confidence = "", 0.0
@@ -434,10 +428,7 @@ def _extract_pattern_from_results(
                     is_better = True
 
             if is_better:
-                if check_type == "part" and expected_digits and digits_only == expected_digits and expected_value:
-                    best_value = expected_value.strip()
-                else:
-                    best_value = normalized
+                best_value = normalized
                 best_confidence = confidence
                 best_digit_count = digit_count
     return best_value, best_confidence
@@ -557,6 +548,11 @@ def read_multi_values(
                     is_better = True
                 elif len(cur_digits) < len(best_digits):
                     is_better = False
+                elif (
+                    best_matches["part"]["variant"] in ("Original", "Center original")
+                    and best_matches["part"]["confidence"] >= 0.70
+                ):
+                    is_better = False
                 else:
                     is_better = conf > best_matches["part"]["confidence"]
 
@@ -596,7 +592,7 @@ def read_multi_values(
                 clean = re.sub(r"\D", "", text)
                 if expected_part_digits in clean or clean == expected_part_digits:
                     best_matches["part"] = {
-                        "value": expected_part.strip(),
+                        "value": text.strip(),
                         "confidence": max(conf, 0.95),
                         "variant": variant_name,
                     }

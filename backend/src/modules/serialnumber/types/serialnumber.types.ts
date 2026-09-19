@@ -20,6 +20,7 @@ export interface SessionInput {
   expected_part_number: string;
   selected_checks?: string[];
   expected_weight?: string;
+  expected_capacity?: string;
   readings: SessionReading[];
 }
 
@@ -27,7 +28,7 @@ export interface OcrResult {
   detected: boolean;
   serial_number: string | null;
   value: string | null;
-  check_type: "serial" | "part" | "weight";
+  check_type: "serial" | "part" | "weight" | "capacity";
   confidence: number;
   enhancement: string | null;
   values?: Record<string, string | null>;
@@ -56,3 +57,30 @@ export interface SessionRecord {
   };
   readings: SessionReading[];
 }
+
+export interface DataResponse<T> {
+  status: number;
+  message: string;
+  data: T;
+}
+
+export interface SessionCreateResult {
+  session_id: number | null;
+  saved_at: string;
+  database_connection: string;
+  json_path: string;
+}
+
+export interface ReadSerialQueryParams {
+  minimum_confidence?: string | number;
+  check_type?: string;
+  range_start?: string;
+  range_end?: string;
+  expected_part?: string;
+  expected_part_number?: string;
+  expected_weight?: string;
+  expected_capacity?: string;
+  exclude_serial?: string;
+  check_types?: string;
+}
+

@@ -1,12 +1,9 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-
 import dotenv from "dotenv";
 
-const backendDirectory = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
+const currentDir = path.dirname(fileURLToPath(import.meta.url));
+const backendDirectory = path.resolve(currentDir, "../../../..");
 const projectDirectory = path.resolve(backendDirectory, "..");
 
 dotenv.config({ path: path.join(backendDirectory, ".env"), quiet: true });
@@ -18,9 +15,10 @@ function resolveSetting(value: string | undefined, fallback: string): string {
     : path.resolve(backendDirectory, configured);
 }
 
-const defaultPython = process.platform === "win32"
-  ? path.join(projectDirectory, "venv", "Scripts", "python.exe")
-  : path.join(projectDirectory, "venv", "bin", "python");
+const defaultPython =
+  process.platform === "win32"
+    ? path.join(projectDirectory, "venv", "Scripts", "python.exe")
+    : path.join(projectDirectory, "venv", "bin", "python");
 
 export const config = {
   backendDirectory,
@@ -47,4 +45,10 @@ export const config = {
     process.env.PYTHON_EXECUTABLE,
     defaultPython,
   ),
+  ocrWorkerPath: process.env.OCR_WORKER_PATH
+    ? path.resolve(process.env.OCR_WORKER_PATH)
+    : path.join(backendDirectory, "ocr_worker.py"),
 };
+
+export default config;
+
