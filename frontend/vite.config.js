@@ -8,14 +8,15 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Enable HTTPS by default so mobile/LAN devices can access the camera
-const disableHttps = process.env.HTTPS === "false" || process.env.NO_HTTPS === "true";
+// By default, run on plain HTTP for clean localhost usage without certificate warnings.
+// To re-enable self-signed HTTPS for LAN devices, start with HTTPS=true
+const enableHttps = process.env.HTTPS === "true";
 
 export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
-    ...(!disableHttps ? [basicSsl()] : []),
+    ...(enableHttps ? [basicSsl()] : []),
   ],
   resolve: {
     alias: {

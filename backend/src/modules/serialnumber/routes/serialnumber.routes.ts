@@ -55,6 +55,19 @@ serialnumberRoutes.post(
 );
 
 serialnumberRoutes.get(
+  "/sessions",
+  authorize([{ property: "session", permission: "read" }]),
+  async (req, res) => {
+    try {
+      const response = await controller.getAllSessionsController(req.query.limit as string);
+      res.sendData(response);
+    } catch (err) {
+      res.sendData(err);
+    }
+  },
+);
+
+serialnumberRoutes.get(
   "/sessions/:sessionId",
   authorize([{ property: "session", permission: "read" }]),
   async (req, res) => {

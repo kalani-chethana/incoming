@@ -1,9 +1,9 @@
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type mysql from "mysql2/promise";
 
 import serialnumberClient, { initializeDatabase } from "../database/serialnumber_client.js";
-import type { SessionInput, SessionRecord } from "../types/serialnumber.types.js";
+import type { SessionInput, SessionRecord, SessionSummaryItem } from "../types/serialnumber.types.js";
 import { config } from "../utils/config.js";
 
 const reportDirectory = config.reportDirectory;
@@ -182,5 +182,72 @@ export const getSessionReport = async (
   if (rows.length === 0) return null;
   const jsonText = await readFile(String(rows[0].json_file), "utf8");
   return JSON.parse(jsonText) as SessionRecord;
+};
+
+export const getAllSessions = async (
+  limit = 100,
+  tx?: mysql.Connection,
+): Promise<SessionSummaryItem[]> => {
+  try {
+    const client = tx || serialnumberClient;
+    const [rows] = await client.query<mysql.RowDataPacket[]>(
+      `SELECT
+        session_id, saved_at, range_start, range_end,
+        expected_part_number, expected_weight,
+        total_readings, total_detected,
+        in_range_count, duplicate_count, out_of_range_count, not_detected_count,
+        part_match_count, part_mismatch_count,
+        weight_match_count, weight_mismatch_count
+      FROM scan_sessions
+      ORDER BY session_id DESC
+      LIMIT ?`,
+      [Number(limit) || 100],
+    );
+    if (rows && rows.length > 0) {
+      return rows as SessionSummaryItem[];
+    }
+  } catch (err) {
+    console.warn("[Repository] Failed to query scan_sessions from database, falling back to JSON files:", err);
+  }
+
+  // Fallback: Read JSON files from reportDirectory
+  try {
+    const files = await readdir(reportDirectory);
+    const jsonFiles = files
+      .filter((f) => f.endsWith(".json") && /^\d+\.json$/.test(f))
+      .sort((a, b) => parseInt(b, 10) - parseInt(a, 10))
+      .slice(0, Number(limit) || 100);
+
+    const summaries: SessionSummaryItem[] = [];
+    for (const file of jsonFiles) {
+      try {
+        const content = await readFile(path.join(reportDirectory, file), "utf8");
+        const parsed = JSON.parse(content) as SessionRecord;
+        summaries.push({
+          session_id: parsed.session_id || parseInt(file, 10),
+          saved_at: parsed.saved_at,
+          range_start: parsed.range?.start ?? "",
+          range_end: parsed.range?.end ?? "",
+          expected_part_number: parsed.expected_part_number ?? "",
+          expected_weight: parsed.expected_weight ?? "",
+          total_readings: parsed.summary?.total_readings ?? parsed.readings?.length ?? 0,
+          total_detected: parsed.summary?.total_detected ?? 0,
+          in_range_count: parsed.summary?.in_range?.count ?? 0,
+          duplicate_count: parsed.summary?.duplicates?.count ?? 0,
+          out_of_range_count: parsed.summary?.out_of_range?.count ?? 0,
+          not_detected_count: parsed.summary?.not_detected_count ?? 0,
+          part_match_count: parsed.summary?.part_match_count ?? 0,
+          part_mismatch_count: parsed.summary?.part_mismatch_count ?? 0,
+          weight_match_count: parsed.summary?.weight_match_count ?? 0,
+          weight_mismatch_count: parsed.summary?.weight_mismatch_count ?? 0,
+        });
+      } catch {
+        // ignore malformed files
+      }
+    }
+    return summaries;
+  } catch {
+    return [];
+  }
 };
 

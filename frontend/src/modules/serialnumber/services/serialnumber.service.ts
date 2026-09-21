@@ -5,6 +5,7 @@ import {
   downloadSessionReportCsv,
   fetchHealth,
   fetchSession,
+  fetchSessions,
   readSerialImage,
 } from "../api/serialnumber.api";
 import type { SessionInput } from "../types/serialnumber.type";
@@ -12,6 +13,7 @@ import type { SessionInput } from "../types/serialnumber.type";
 export const SERIAL_NUMBER_QUERY_KEYS = {
   health: ["serialnumber", "health"] as const,
   session: (id: number) => ["serialnumber", "session", id] as const,
+  sessions: (limit: number) => ["serialnumber", "sessions", limit] as const,
 };
 
 export const useHealthQuery = () => {
@@ -27,6 +29,13 @@ export const useSessionQuery = (sessionId: number | null) => {
     queryKey: SERIAL_NUMBER_QUERY_KEYS.session(sessionId || 0),
     queryFn: () => fetchSession(sessionId!),
     enabled: Boolean(sessionId && sessionId > 0),
+  });
+};
+
+export const useSessionsQuery = (limit = 100) => {
+  return useQuery({
+    queryKey: SERIAL_NUMBER_QUERY_KEYS.sessions(limit),
+    queryFn: () => fetchSessions(limit),
   });
 };
 
@@ -55,6 +64,9 @@ export const useCreateSessionMutation = () => {
           queryKey: SERIAL_NUMBER_QUERY_KEYS.session(sessionId),
         });
       }
+      queryClient.invalidateQueries({
+        queryKey: ["serialnumber", "sessions"],
+      });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to save session");

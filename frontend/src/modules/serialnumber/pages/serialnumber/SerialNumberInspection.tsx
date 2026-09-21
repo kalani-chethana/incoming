@@ -85,12 +85,25 @@ export const SerialNumberInspection: React.FC = () => {
   const [autoCapture, setAutoCapture] = useState(true);
   const [captureFlash, setCaptureFlash] = useState<{
     show: boolean;
-    status: "pass" | "duplicate" | "out_of_range" | "normal";
+    status: "pass" | "duplicate" | "out_of_range" | "mismatch" | "normal";
     message: string;
-  }>({ show: false, status: "normal", message: "" });
+    subMessage?: string;
+  }>({ show: false, status: "normal", message: "", subMessage: "" });
   const cooldownRef = useRef(0);
+  const awaitingClearRef = useRef(false);
   const leftCardRef = useRef<HTMLDivElement>(null);
   const [leftCardHeight, setLeftCardHeight] = useState<number | null>(null);
+
+  const steps = CHECKS.filter((check) => selected[check.id]);
+  const currentStep = steps[stepIndex];
+  const serialConfigured =
+    !selected.serial ||
+    (rangeStart && rangeEnd && BigInt(rangeStart) <= BigInt(rangeEnd));
+  const configurationReady =
+    steps.length > 0 &&
+    serialConfigured &&
+    (!selected.part || expectedPart.trim().length > 0) &&
+    (!selected.weight || expectedWeight.trim().length > 0);
 
   useEffect(() => {
     if (!started) return;
@@ -103,50 +116,33 @@ export const SerialNumberInspection: React.FC = () => {
     };
     updateHeight();
 
-    const node = leftCardRef.current;
-    if (!node) return;
-    const observer = new ResizeObserver(updateHeight);
-    observer.observe(node);
     window.addEventListener("resize", updateHeight);
-
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", updateHeight);
-    };
-  }, [started]);
+    return () => window.removeEventListener("resize", updateHeight);
+  }, [started, steps.length, readings.length]);
 
   const readSerialMutation = useReadSerialMutation();
   const createSessionMutation = useCreateSessionMutation();
 
-  function triggerSuccessFeedback(msg = "✓ Captured") {
-    setCaptureFlash({ show: true, status: "pass", message: msg });
-    setTimeout(() => setCaptureFlash({ show: false, status: "normal", message: "" }), 900);
-    cooldownRef.current = Date.now() + 1500;
+  function triggerSuccessFeedback(msg = "✓ Verified - OK", subMsg = "") {
+    setCaptureFlash({ show: true, status: "pass", message: msg, subMessage: subMsg });
+    setTimeout(() => setCaptureFlash({ show: false, status: "normal", message: "", subMessage: "" }), 1500);
+    cooldownRef.current = Date.now() + 1800;
     playSuccessChime();
   }
 
-  function triggerAlertFeedback(type: "duplicate" | "out_of_range", serial: string) {
+  function triggerAlertFeedback(type: "duplicate" | "out_of_range" | "mismatch", title: string, subMsg = "") {
     const isDup = type === "duplicate";
+    const isRange = type === "out_of_range";
     setCaptureFlash({
       show: true,
       status: type,
-      message: isDup ? `⚠ Duplicate: ${serial}` : `✕ Out of Range: ${serial}`,
+      message: isDup ? `⚠ Duplicate: ${title}` : isRange ? `✕ Out of Range: ${title}` : `✕ Mismatch: ${title}`,
+      subMessage: subMsg,
     });
-    setTimeout(() => setCaptureFlash({ show: false, status: "normal", message: "" }), 1400);
-    cooldownRef.current = Date.now() + 2000;
+    setTimeout(() => setCaptureFlash({ show: false, status: "normal", message: "", subMessage: "" }), 1800);
+    cooldownRef.current = Date.now() + 2200;
     playAlertTone();
   }
-
-  const steps = CHECKS.filter((check) => selected[check.id]);
-  const currentStep = steps[stepIndex];
-  const serialConfigured =
-    !selected.serial ||
-    (rangeStart && rangeEnd && BigInt(rangeStart) <= BigInt(rangeEnd));
-  const configurationReady =
-    steps.length > 0 &&
-    serialConfigured &&
-    (!selected.part || expectedPart.trim().length > 0) &&
-    (!selected.weight || expectedWeight.trim().length > 0);
 
   // Camera Management Effect
   useEffect(() => {
@@ -311,8 +307,19 @@ export const SerialNumberInspection: React.FC = () => {
   }
 
   function finishPiece(values: Record<string, string>, alreadyAlerted = false) {
-    const serial = values.serial || "Not detected";
-    let status = selected.serial ? "Not detected" : "Not checked";
+    // Never record a piece if none of the selected checks were detected
+    const hasDetectedValue = steps.some(
+      (step) => values[step.id] && values[step.id].trim().length > 0 && values[step.id] !== "Not detected"
+    );
+    if (!hasDetectedValue) {
+      setPiece({});
+      setStepIndex(0);
+      setAttemptCount(0);
+      return;
+    }
+
+    const serial = values.serial || (selected.serial ? "Not detected" : "Not checked");
+    let status = selected.serial ? (values.serial ? "In range" : "Not detected") : "Not checked";
     if (values.serial) {
       const numeric = BigInt(extractDigits(values.serial));
       if (rangeStart && rangeEnd && (numeric < BigInt(rangeStart) || numeric > BigInt(rangeEnd))) {
@@ -370,6 +377,30 @@ export const SerialNumberInspection: React.FC = () => {
     setPiece({});
     setStepIndex(0);
     setAttemptCount(0);
+    awaitingClearRef.current = true;
+
+    const isSuccess =
+      (!selected.serial || status === "In range") &&
+      (!selected.part || partMatched) &&
+      (!selected.weight || capacityMatched);
+
+    if (isSuccess) {
+      toast.success("Piece Completed & Verified", {
+        description: `Logged: ${[
+          selected.serial && values.serial ? `Serial #${values.serial}` : null,
+          selected.part && values.part ? `Part ${values.part}` : null,
+          selected.weight && values.weight ? `Capacity ${values.weight}` : null,
+        ]
+          .filter(Boolean)
+          .join(" • ")}`,
+        duration: 4000,
+      });
+    } else {
+      toast.error("Piece Logged with Discrepancies", {
+        description: "Piece recorded with inspection errors. Please check the log.",
+        duration: 4500,
+      });
+    }
   }
 
   async function readImage(image: File | null, isAuto = false) {
@@ -437,19 +468,68 @@ export const SerialNumberInspection: React.FC = () => {
         extraSummary = `Also captured Capacity: ${detectedValues.weight} (Step 3 auto-completes)`;
       }
 
-      setResult({
-        type: currentStep.id === "weight" ? "capacity" : currentStep.id,
-        value,
-        attempt,
-        extraSummary,
-      });
+      if (!value) {
+        if (isAuto) {
+          // In auto-capture mode:
+          // If previous piece was finished and workpiece is now removed (empty stage),
+          // clear the flag so the next piece can be detected.
+          if (awaitingClearRef.current) {
+            awaitingClearRef.current = false;
+          }
+          // Auto-scanning continues running until something is detected.
+          // Do NOT record, do NOT advance steps, do NOT limit to 3 attempts.
+          return;
+        }
 
-      if (!value && attempt < 3) {
-        setAttemptCount(attempt);
+        // In manual capture mode:
+        if (attempt < 3) {
+          setAttemptCount(attempt);
+          setResult({
+            type: currentStep.id === "weight" ? "capacity" : currentStep.id,
+            value: null,
+            attempt,
+            extraSummary: "",
+          });
+          return;
+        }
+
+        // After 3 manual attempts, notify the user without recording an empty row
+        toast.error(`Not detected`, {
+          description: `Could not detect ${currentStep.label}. Please adjust the item and try again.`,
+          duration: 4000,
+        });
+        setAttemptCount(0);
+        setResult({
+          type: currentStep.id === "weight" ? "capacity" : currentStep.id,
+          value: null,
+          attempt: 0,
+          extraSummary: "",
+        });
         return;
       }
 
+      // If in auto-capture mode and previous piece hasn't been removed yet, do not re-record
+      if (isAuto && awaitingClearRef.current) {
+        return;
+      }
+
+      setResult({
+        type: currentStep.id === "weight" ? "capacity" : currentStep.id,
+        value,
+        attempt: 0,
+        extraSummary,
+      });
+
       let alreadyAlerted = false;
+      let successMsg = "✓ Verified - OK";
+      let successSubMsg = "";
+
+      const bothSerialAndWeightCaptured =
+        currentStep.id === "serial" &&
+        selected.weight &&
+        Boolean(detectedValues.weight) &&
+        !piece.weight;
+
       if (currentStep.id === "serial" && value) {
         const numeric = BigInt(extractDigits(value));
         if (rangeStart && rangeEnd && (numeric < BigInt(rangeStart) || numeric > BigInt(rangeEnd))) {
@@ -457,7 +537,7 @@ export const SerialNumberInspection: React.FC = () => {
             description: `Serial #${value} is outside the specified range (${rangeStart} – ${rangeEnd}).`,
             duration: 4500,
           });
-          triggerAlertFeedback("out_of_range", value);
+          triggerAlertFeedback("out_of_range", `Serial #${value}`, `Outside range ${rangeStart} – ${rangeEnd}`);
           alreadyAlerted = true;
         } else if (
           readings.some((item) => extractDigits(item.serial) === extractDigits(value))
@@ -466,30 +546,79 @@ export const SerialNumberInspection: React.FC = () => {
             description: `Serial #${value} has already been recorded in this session.`,
             duration: 4500,
           });
-          triggerAlertFeedback("duplicate", value);
+          triggerAlertFeedback("duplicate", `Serial #${value}`, "Already recorded in this session");
           alreadyAlerted = true;
+        } else if (bothSerialAndWeightCaptured) {
+          const weightVal = detectedValues.weight!;
+          const capMatched = isCapacityMatched(weightVal, expectedWeight);
+          if (expectedWeight && !capMatched) {
+            toast.error(`Capacity Mismatched: ${weightVal}`, {
+              description: `Serial #${value} verified, but Capacity ${weightVal} does not match expected ${expectedWeight}.`,
+              duration: 4500,
+            });
+            triggerAlertFeedback("mismatch", "Weight Mismatched", `Detected: ${weightVal} • Expected: ${expectedWeight}`);
+            alreadyAlerted = true;
+          } else {
+            toast.success("Serial & Weight Captured & Verified", {
+              description: `Serial #${value} & Weight ${weightVal} both verified successfully.`,
+              duration: 3500,
+            });
+            successMsg = "✓ Serial & Weight Verified - OK";
+            successSubMsg = `Serial: #${value} • Weight: ${weightVal}`;
+          }
+        } else {
+          toast.success("Serial Number Captured & Verified", {
+            description: `Serial #${value}${rangeStart && rangeEnd ? ` is within range (${rangeStart} – ${rangeEnd})` : " verified"}`,
+            duration: 3500,
+          });
+          successMsg = "✓ Serial Number Verified - OK";
+          successSubMsg = `Serial: #${value}`;
+        }
+      } else if (currentStep.id === "part" && value) {
+        const partMatched = isPartMatched(value, expectedPart);
+        if (!partMatched && expectedPart) {
+          toast.error(`Part Mismatched: ${value}`, {
+            description: `Detected "${value}" does not match expected "${expectedPart}".`,
+            duration: 4500,
+          });
+          triggerAlertFeedback("mismatch", "Part Number Mismatched", `Detected: ${value} • Expected: ${expectedPart}`);
+          alreadyAlerted = true;
+        } else {
+          toast.success("Part Number Captured & Verified", {
+            description: `Part #${value}${expectedPart ? ` matched expected (${expectedPart})` : " verified"}`,
+            duration: 3500,
+          });
+          successMsg = "✓ Part Number Verified - OK";
+          successSubMsg = `Part #: ${value}`;
+        }
+      } else if (currentStep.id === "weight" && value) {
+        const capMatched = isCapacityMatched(value, expectedWeight);
+        if (!capMatched && expectedWeight) {
+          toast.error(`Capacity Mismatched: ${value}`, {
+            description: `Detected "${value}" does not match expected "${expectedWeight}".`,
+            duration: 4500,
+          });
+          triggerAlertFeedback("mismatch", "Weight Number Mismatched", `Detected: ${value} • Expected: ${expectedWeight}`);
+          alreadyAlerted = true;
+        } else {
+          toast.success("Weight Number Captured & Verified", {
+            description: `Weight ${value}${expectedWeight ? ` matched expected (${expectedWeight})` : " verified"}`,
+            duration: 3500,
+          });
+          successMsg = "✓ Weight Number Verified - OK";
+          successSubMsg = `Weight: ${value}`;
         }
       }
 
       if (!alreadyAlerted && value) {
-        triggerSuccessFeedback();
+        triggerSuccessFeedback(successMsg, successSubMsg);
       }
 
       setAttemptCount(0);
 
-      const nextPiece: Record<string, string> = { ...piece };
-      if (value) {
-        nextPiece[currentStep.id] = value;
-      } else {
-        nextPiece[currentStep.id] = "";
-      }
+      const nextPiece: Record<string, string> = { ...piece, [currentStep.id]: value };
 
-      if (
-        currentStep.id === "serial" &&
-        selected.weight &&
-        detectedValues.weight &&
-        !nextPiece.weight
-      ) {
+      if (bothSerialAndWeightCaptured && detectedValues.weight) {
         nextPiece.weight = detectedValues.weight;
       }
 
@@ -511,10 +640,10 @@ export const SerialNumberInspection: React.FC = () => {
           setPiece(nextPiece);
           setStepIndex(weightIndex);
         } else {
-          finishPiece(nextPiece);
+          finishPiece(nextPiece, alreadyAlerted);
         }
       } else {
-        finishPiece(nextPiece);
+        finishPiece(nextPiece, alreadyAlerted);
       }
     } catch (error: any) {
       if (!isAuto) {
@@ -604,6 +733,7 @@ export const SerialNumberInspection: React.FC = () => {
     setAttemptCount(0);
     setCaptureFlash({ show: false, status: "normal", message: "" });
     cooldownRef.current = 0;
+    awaitingClearRef.current = false;
     setExpectedPart("");
     setExpectedWeight("");
     setCameraReady(false);
@@ -896,7 +1026,10 @@ export const SerialNumberInspection: React.FC = () => {
                     onCameraChange={setSelectedCameraId}
                     activeLabel={currentStep?.label}
                     autoCapture={autoCapture}
-                    onAutoCaptureChange={setAutoCapture}
+                    onAutoCaptureChange={(val) => {
+                      awaitingClearRef.current = false;
+                      setAutoCapture(val);
+                    }}
                   />
                 </div>
               </div>
@@ -925,25 +1058,32 @@ export const SerialNumberInspection: React.FC = () => {
                     )}
                     {captureFlash.show && (
                       <div
-                        className={`absolute inset-0 backdrop-blur-[2px] border-4 flex items-center justify-center transition-all z-20 ${
+                        className={`absolute inset-0 backdrop-blur-[3px] border-4 flex flex-col items-center justify-center transition-all z-20 p-4 text-center ${
                           captureFlash.status === "duplicate"
-                            ? "bg-amber-500/20 border-amber-500"
-                            : captureFlash.status === "out_of_range"
-                              ? "bg-rose-600/25 border-rose-600"
-                              : "bg-[#2da755]/20 border-[#22c55e]"
+                            ? "bg-amber-500/25 border-amber-500"
+                            : captureFlash.status === "out_of_range" || captureFlash.status === "mismatch"
+                              ? "bg-rose-600/30 border-rose-600"
+                              : "bg-[#2da755]/25 border-[#22c55e]"
                         }`}
                       >
-                        <span
-                          className={`font-black px-4 py-2 rounded-full shadow-lg text-sm tracking-wide text-white ${
+                        <div
+                          className={`flex flex-col items-center gap-1.5 px-6 py-3.5 rounded-2xl shadow-2xl max-w-[92%] text-white animate-in fade-in zoom-in-95 duration-200 ${
                             captureFlash.status === "duplicate"
-                              ? "bg-amber-600"
-                              : captureFlash.status === "out_of_range"
-                                ? "bg-rose-600"
-                                : "bg-[#2da755]"
+                              ? "bg-amber-600/95 border border-amber-400/60"
+                              : captureFlash.status === "out_of_range" || captureFlash.status === "mismatch"
+                                ? "bg-rose-600/95 border border-rose-400/60"
+                                : "bg-[#1f8a42]/95 border border-emerald-400/60"
                           }`}
                         >
-                          {captureFlash.message}
-                        </span>
+                          <span className="font-black text-base sm:text-lg tracking-wide flex items-center gap-2">
+                            {captureFlash.message}
+                          </span>
+                          {captureFlash.subMessage && (
+                            <span className="font-mono text-xs sm:text-sm font-semibold opacity-95 tracking-normal bg-black/25 px-3 py-1 rounded-lg">
+                              {captureFlash.subMessage}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     )}
                   </>

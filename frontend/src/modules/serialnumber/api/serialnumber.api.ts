@@ -5,6 +5,7 @@ import type {
   OcrResponseData,
   SessionInput,
   SessionRecord,
+  SessionSummaryItem,
 } from "../types/serialnumber.type";
 
 export const readSerialImage = async (
@@ -39,6 +40,15 @@ export const fetchSession = async (
 ): Promise<DataResponse<SessionRecord>> => {
   const { data } = await api.get<DataResponse<SessionRecord>>(
     `/serialnumber/sessions/${sessionId}`,
+  );
+  return data;
+};
+
+export const fetchSessions = async (
+  limit = 100,
+): Promise<DataResponse<SessionSummaryItem[]>> => {
+  const { data } = await api.get<DataResponse<SessionSummaryItem[]>>(
+    `/serialnumber/sessions?limit=${limit}`,
   );
   return data;
 };

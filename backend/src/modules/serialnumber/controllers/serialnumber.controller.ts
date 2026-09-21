@@ -7,6 +7,7 @@ import type {
   SessionCreateResult,
   SessionInput,
   SessionRecord,
+  SessionSummaryItem,
 } from "../types/serialnumber.types.js";
 import { ApiError } from "../utils/app_error.js";
 import { sessionReportToCsv } from "../utils/csv_helper.js";
@@ -147,6 +148,18 @@ export const getSessionCsvController = async (
     csv,
     filename: `forgelens-session-${sessionId}.csv`,
     record,
+  };
+};
+
+export const getAllSessionsController = async (
+  rawLimit?: string | number,
+): Promise<DataResponse<SessionSummaryItem[]>> => {
+  const limit = rawLimit ? Number(rawLimit) : 100;
+  const sessions = await repo.getAllSessions(limit);
+  return {
+    status: HTTP_STATUS.OK,
+    message: "Sessions retrieved successfully",
+    data: sessions,
   };
 };
 

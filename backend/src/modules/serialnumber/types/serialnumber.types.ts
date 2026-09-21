@@ -58,6 +58,25 @@ export interface SessionRecord {
   readings: SessionReading[];
 }
 
+export interface SessionSummaryItem {
+  session_id: number;
+  saved_at: string;
+  range_start: string;
+  range_end: string;
+  expected_part_number: string;
+  expected_weight: string;
+  total_readings: number;
+  total_detected: number;
+  in_range_count: number;
+  duplicate_count: number;
+  out_of_range_count: number;
+  not_detected_count: number;
+  part_match_count: number;
+  part_mismatch_count: number;
+  weight_match_count: number;
+  weight_mismatch_count: number;
+}
+
 export interface DataResponse<T> {
   status: number;
   message: string;
