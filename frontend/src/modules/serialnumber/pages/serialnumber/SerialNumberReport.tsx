@@ -403,10 +403,9 @@ export const SerialNumberReport: React.FC = () => {
             </>
           )}
         </div>
-      ) : null}
-
-      {/* VIEW 2: ALL HISTORICAL SESSIONS TABLE (UP TO NOW) */}
-      <div className="bg-white border border-[#d6ebd9] rounded-2xl overflow-hidden shadow-2xs">
+      ) : (
+        /* VIEW 2: ALL HISTORICAL SESSIONS TABLE (UP TO NOW) */
+        <div className="bg-white border border-[#d6ebd9] rounded-2xl overflow-hidden shadow-2xs">
         {/* Table Header Controls */}
         <div className="p-4 sm:p-5 border-b border-[#d6ebd9]/80 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -620,6 +619,7 @@ export const SerialNumberReport: React.FC = () => {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 };
