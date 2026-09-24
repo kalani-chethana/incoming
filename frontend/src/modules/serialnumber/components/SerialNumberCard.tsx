@@ -133,7 +133,12 @@ export const DetectedValueCard: React.FC<DetectedValueCardProps> = ({
   const currentStep = steps[stepIndex];
 
   // Helper to extract value & status for each step in sequence
-  const stepItems = steps.map((step, idx) => {
+  const stepItems: Array<{
+    step: CheckItem;
+    idx: number;
+    rawValue: string;
+    status: "pass" | "fail" | "duplicate" | "active" | "pending";
+  }> = steps.map((step, idx) => {
     let rawValue: string = "—";
     let status: "pass" | "fail" | "duplicate" | "active" | "pending" = "pending";
 

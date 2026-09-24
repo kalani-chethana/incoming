@@ -6,28 +6,28 @@ import {
   DetectedValueCard,
   ReadingStatusBadge,
   SerialNumberSelect,
-} from "../../components";
-import { playAlertTone, playSuccessChime } from "../../libs/audio";
+} from "../components";
+import { playAlertTone, playSuccessChime } from "../libs/audio";
 import {
   extractDigits,
   isCapacityMatched,
   isPartMatched,
   normalize,
   normalizeWeight,
-} from "../../libs/normalization";
+} from "../libs/normalization";
 import { toast } from "sonner";
 import {
   downloadCsvBlob,
   useCreateSessionMutation,
   useReadSerialMutation,
-} from "../../services/serialnumber.service";
+} from "../services/serialnumber.service";
 import type {
   CheckItem,
   CreateSessionResponseData,
   OcrResponseData,
   ReadingRow,
   ResultState,
-} from "../../types/serialnumber.type";
+} from "../types/serialnumber.type";
 
 const CHECKS: CheckItem[] = [
   { id: "serial", label: "Serial number" },
@@ -100,7 +100,6 @@ export const SerialNumberInspection: React.FC = () => {
     isFinalStep: boolean;
     nextStepIndex: number;
     nextStepLabel: string;
-    row?: ReadingRow;
   } | null>(null);
   const [acceptedAlertSteps, setAcceptedAlertSteps] = useState<string[]>([]);
   const cooldownRef = useRef(0);

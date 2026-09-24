@@ -1,5 +1,5 @@
 import api from "@/lib/api";
-import type { DataResponse } from "@/types/api.types";
+import type { DataResponse } from "../types/api.types";
 import type {
   CreateSessionResponseData,
   OcrResponseData,

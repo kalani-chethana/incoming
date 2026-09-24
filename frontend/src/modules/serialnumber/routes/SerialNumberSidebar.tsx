@@ -1,4 +1,4 @@
-import type { SidebarItem } from "@/types/layout.types";
+import type { SidebarItem } from "../types/layout.types";
 import { FileSpreadsheet, Scan } from "lucide-react";
 
 export const serialnumberSidebar: SidebarItem[] = [

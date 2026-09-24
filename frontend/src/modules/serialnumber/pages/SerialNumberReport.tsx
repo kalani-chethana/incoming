@@ -19,17 +19,17 @@ import {
 import {
   CheckStatusBadge,
   ReadingStatusBadge,
-} from "../../components";
-import { extractDigits } from "../../libs/normalization";
+} from "../components";
+import { extractDigits } from "../libs/normalization";
 import {
   downloadCsvBlob,
   useSessionQuery,
   useSessionsQuery,
-} from "../../services/serialnumber.service";
+} from "../services/serialnumber.service";
 import type {
   SessionRecord,
   SessionSummaryItem,
-} from "../../types/serialnumber.type";
+} from "../types/serialnumber.type";
 
 export const SerialNumberReport: React.FC = () => {
   const [filterQuery, setFilterQuery] = useState("");

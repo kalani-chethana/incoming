@@ -1,5 +1,5 @@
 import React from "react";
-import type { Permission } from "../../../types/layout.types";
+import type { Permission } from "../types/layout.types";
 
 interface PermissionRouteProps {
   permissions?: Permission[];
