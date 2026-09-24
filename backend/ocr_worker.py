@@ -243,7 +243,10 @@ def _without_weight_fragments(
     results: list[tuple[Any, str, float]],
 ) -> list[tuple[Any, str, float]]:
     """Exclude a numeric box when its next same-row box is a weight unit."""
-    weight_units = {"LB", "LBS", "KG", "G", "IB", "1B"}
+    weight_units = {
+        "LB", "LBS", "KG", "KGS", "G", "IB", "1B", "KLB", "KLBS", "K1B", "KIB", "KB",
+        "N", "KN", "KGF", "LBF", "T", "TON", "TONNE", "TONNES", "GRAM", "GRAMS",
+    }
     excluded: set[int] = set()
     for unit_index, unit_result in enumerate(results):
         unit_text = re.sub(r"[^A-Z0-9]", "", unit_result[1].upper())
@@ -334,13 +337,18 @@ def _extract_pattern_from_results(
     """Extract best part or weight candidate from an OCR result set."""
     patterns = {
         "part": re.compile(r"^[A-Z0-9]+(?:[ -][A-Z0-9]+)*$", re.I),
-        "weight": re.compile(r"^\d+(?:\.\d+)?\s*(?:LB|LBS|KG|G)$", re.I),
+        "weight": re.compile(
+            r"^\d+(?:\.\d+)?\s*(?:KLBS?|K1B|KIB|KB|KGF|LBF|LBS?|1B|IB|KGS?|KN|N|G|T)$",
+            re.I,
+        ),
     }
     pattern = patterns.get(check_type)
     if pattern is None:
         return "", 0.0
 
-    weight_units_pattern = re.compile(r"(?:LB|LBS|KG|G|1B|IB)$", re.I)
+    weight_units_pattern = re.compile(
+        r"(?:KLBS?|K1B|KIB|KB|KGF|LBF|LBS?|1B|IB|KGS?|KN|N|G|T)$", re.I
+    )
 
     # Safe exclude set: NEVER exclude the expected part number
     safe_exclude_digits: set[str] = set(exclude_digits or ())
@@ -352,15 +360,23 @@ def _extract_pattern_from_results(
 
     candidates: list[tuple[str, float]] = []
 
-    # 1. Direct bounding boxes and sub-matches for labeled text (e.g. "PART: 07-1076 05")
+    # 1. Direct bounding boxes and sub-matches for labeled text (e.g. "PART: 07-1076 05", "CAP: 1klb")
     for _, text, confidence in results:
         candidates.append((text, confidence))
         if check_type == "part":
             sub_matches = re.findall(r"[A-Z0-9]+(?:[ -][A-Z0-9]+)+", text, re.I)
             for sub in sub_matches:
                 candidates.append((sub, confidence))
+        elif check_type == "weight":
+            sub_matches = re.findall(
+                r"\d+(?:\.\d+)?\s*(?:KLBS?|K1B|KIB|KB|KGF|LBF|LBS?|1B|IB|KGS?|KN|N|G|T)\b",
+                text,
+                re.I,
+            )
+            for sub in sub_matches:
+                candidates.append((sub, confidence))
 
-    # 2. Grouped rows for adjacent boxes (e.g. "07-1076" followed by "05")
+    # 2. Grouped rows for adjacent boxes (e.g. "07-1076" followed by "05", or "1" followed by "klb")
     for row in _group_text_rows(results, minimum_confidence):
         for start in range(len(row)):
             for end in range(start + 2, len(row) + 1):
@@ -388,7 +404,22 @@ def _extract_pattern_from_results(
                 continue
         else:
             normalized = re.sub(r"\s+", "", text).upper()
-            normalized = re.sub(r"(?<=\d)(?:IB|1B)$", "LB", normalized)
+            # Normalize KLB variations: 1k1b, 1kib, 1klbs, 1kb -> 1KLB
+            normalized = re.sub(r"K(?:IB|1B|LB)S?$", "KLB", normalized)
+            if (expected_value and "KLB" in expected_value.upper()) or "KB" in normalized:
+                normalized = re.sub(r"(?<=\d)KB$", "KLB", normalized)
+            # Normalize force units: KGF & LBF
+            normalized = re.sub(r"(?<=\d)KGF$", "KGF", normalized)
+            normalized = re.sub(r"(?<=\d)LBF$", "LBF", normalized)
+            # Normalize LB & KG variations
+            normalized = re.sub(r"(?<=\d)(?:IB|1B|LBS)$", "LB", normalized)
+            normalized = re.sub(r"(?<=\d)(?:KGS?|K9)$", "KG", normalized)
+            # Normalize Newton & Kilonewton
+            normalized = re.sub(r"(?<=\d)KN$", "KN", normalized)
+            normalized = re.sub(r"(?<=\d)N$", "N", normalized)
+            # Normalize Metric Tonne & Gram
+            normalized = re.sub(r"(?<=\d)(?:TONNE?S?|T)$", "T", normalized)
+            normalized = re.sub(r"(?<=\d)(?:GRAMS?|G)$", "G", normalized)
 
         enough_digits = (
             check_type != "part"
@@ -408,6 +439,26 @@ def _extract_pattern_from_results(
                     if best_value
                     else False
                 )
+                if matches_expected and not best_matches_expected:
+                    is_better = True
+                elif not matches_expected and best_matches_expected:
+                    is_better = False
+                else:
+                    is_better = confidence > best_confidence
+            elif check_type == "weight" and expected_value:
+                norm_exp = re.sub(r"\s+", "", expected_value).upper()
+                norm_exp = re.sub(r"K(?:IB|1B|LB)S?$", "KLB", norm_exp)
+                norm_exp = re.sub(r"(?<=\d)KB$", "KLB", norm_exp)
+                norm_exp = re.sub(r"(?<=\d)KGF$", "KGF", norm_exp)
+                norm_exp = re.sub(r"(?<=\d)LBF$", "LBF", norm_exp)
+                norm_exp = re.sub(r"(?<=\d)(?:IB|1B|LBS)$", "LB", norm_exp)
+                norm_exp = re.sub(r"(?<=\d)(?:KGS?|K9)$", "KG", norm_exp)
+                norm_exp = re.sub(r"(?<=\d)KN$", "KN", norm_exp)
+                norm_exp = re.sub(r"(?<=\d)N$", "N", norm_exp)
+                norm_exp = re.sub(r"(?<=\d)(?:TONNE?S?|T)$", "T", norm_exp)
+                norm_exp = re.sub(r"(?<=\d)(?:GRAMS?|G)$", "G", norm_exp)
+                matches_expected = (normalized == norm_exp)
+                best_matches_expected = (best_value == norm_exp if best_value else False)
                 if matches_expected and not best_matches_expected:
                     is_better = True
                 elif not matches_expected and best_matches_expected:
@@ -467,6 +518,7 @@ def read_multi_values(
     check_types: list[str],
     minimum_confidence: float = MINIMUM_CONFIDENCE,
     expected_part: str | None = None,
+    expected_weight: str | None = None,
     exclude_serial: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Extract multiple check types (serial, weight, part) with early-exit optimization."""
@@ -507,7 +559,7 @@ def read_multi_values(
 
         if "weight" in targets or "serial" in targets:
             val, conf = _extract_pattern_from_results(
-                results, "weight", minimum_confidence
+                results, "weight", minimum_confidence, expected_value=expected_weight
             )
             if val and conf > best_matches["weight"]["confidence"]:
                 best_matches["weight"] = {
@@ -609,6 +661,7 @@ def read_typed_value(
     check_type: str,
     minimum_confidence: float = MINIMUM_CONFIDENCE,
     expected_part: str | None = None,
+    expected_weight: str | None = None,
     exclude_serial: str | None = None,
 ) -> tuple[str, float, str]:
     """Read one value according to the active UI step."""
@@ -618,6 +671,7 @@ def read_typed_value(
         [check_type],
         minimum_confidence,
         expected_part=expected_part,
+        expected_weight=expected_weight,
         exclude_serial=exclude_serial,
     )
     result = matches.get(check_type, {"value": "", "confidence": 0.0, "variant": ""})
@@ -643,6 +697,7 @@ def run_worker() -> None:
             if check_type not in check_types:
                 check_types.append(check_type)
             expected_part = request.get("expected_part")
+            expected_weight = request.get("expected_weight")
             exclude_serial = request.get("exclude_serial")
 
             multi_results = read_multi_values(
@@ -651,6 +706,7 @@ def run_worker() -> None:
                 check_types,
                 minimum_confidence=float(request.get("minimum_confidence", 0.30)),
                 expected_part=str(expected_part) if expected_part else None,
+                expected_weight=str(expected_weight) if expected_weight else None,
                 exclude_serial=str(exclude_serial) if exclude_serial else None,
             )
             primary = multi_results.get(

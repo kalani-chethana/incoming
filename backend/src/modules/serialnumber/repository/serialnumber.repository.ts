@@ -1,12 +1,12 @@
-import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import path from "node:path";
 import type mysql from "mysql2/promise";
 
 import serialnumberClient, { initializeDatabase } from "../database/serialnumber_client.js";
-import type { SessionInput, SessionRecord, SessionSummaryItem } from "../types/serialnumber.types.js";
-import { config } from "../utils/config.js";
-
-const reportDirectory = config.reportDirectory;
+import type {
+  SessionInput,
+  SessionReading,
+  SessionRecord,
+  SessionSummaryItem,
+} from "../types/serialnumber.types.js";
 
 export function validateSession(session: SessionInput): void {
   if (!/^\d+$/.test(session.range_start) || !/^\d+$/.test(session.range_end)) {
@@ -74,11 +74,9 @@ export const saveSession = async (
   tx?: mysql.Connection,
 ): Promise<string> => {
   await initializeDatabase();
-  await mkdir(reportDirectory, { recursive: true });
 
   const client = tx || (await serialnumberClient.getConnection());
   const isDedicatedTx = Boolean(tx);
-  let jsonPath: string | null = null;
 
   try {
     if (!isDedicatedTx) {
@@ -142,26 +140,14 @@ export const saveSession = async (
       );
     }
 
-    jsonPath = path.join(reportDirectory, `${record.session_id}.json`);
-    const temporaryPath = `${jsonPath}.tmp`;
-    const jsonText = JSON.stringify(record, null, 2);
-    await writeFile(temporaryPath, jsonText, "utf8");
-    await rename(temporaryPath, jsonPath);
-
-    await client.query(
-      "UPDATE scan_sessions SET json_file = ? WHERE session_id = ?",
-      [jsonPath, record.session_id],
-    );
-
     if (!isDedicatedTx) {
       await (client as mysql.PoolConnection).commit();
     }
-    return jsonPath;
+    return "";
   } catch (error) {
     if (!isDedicatedTx) {
       await (client as mysql.PoolConnection).rollback();
     }
-    if (jsonPath) await unlink(jsonPath).catch(() => undefined);
     throw error;
   } finally {
     if (!isDedicatedTx) {
@@ -176,12 +162,79 @@ export const getSessionReport = async (
 ): Promise<SessionRecord | null> => {
   const client = tx || serialnumberClient;
   const [rows] = await client.query<mysql.RowDataPacket[]>(
-    "SELECT json_file FROM scan_sessions WHERE session_id = ?",
+    "SELECT * FROM scan_sessions WHERE session_id = ?",
     [sessionId],
   );
   if (rows.length === 0) return null;
-  const jsonText = await readFile(String(rows[0].json_file), "utf8");
-  return JSON.parse(jsonText) as SessionRecord;
+  const s = rows[0];
+
+  const [readingRows] = await client.query<mysql.RowDataPacket[]>(
+    `SELECT
+      reading_id,
+      captured_at,
+      serial_number,
+      serial_status,
+      part_number,
+      part_check,
+      weight_number,
+      weight_check
+    FROM scan_readings
+    WHERE session_id = ?
+    ORDER BY reading_id ASC`,
+    [sessionId],
+  );
+
+  const parseJsonList = (val: any): string[] => {
+    if (!val) return [];
+    try {
+      return typeof val === "string" ? JSON.parse(val) : val;
+    } catch {
+      return [];
+    }
+  };
+
+  const readings: SessionReading[] = readingRows.map((r) => ({
+    time: r.captured_at,
+    serial: r.serial_number,
+    status: r.serial_status,
+    part_number: r.part_number,
+    part_check: r.part_check,
+    weight: r.weight_number,
+    weight_check: r.weight_check,
+  }));
+
+  return {
+    session_id: Number(s.session_id),
+    saved_at: s.saved_at,
+    range: { start: s.range_start, end: s.range_end },
+    expected_part_number: s.expected_part_number || "",
+    selected_checks: ["serial", "part", "weight"],
+    expected_weight: s.expected_weight || "",
+    summary: {
+      total_readings: Number(s.total_readings) || 0,
+      total_detected: Number(s.total_detected) || 0,
+      in_range: {
+        count: Number(s.in_range_count) || 0,
+        numbers: parseJsonList(s.in_range_numbers_json),
+      },
+      duplicates: {
+        count: Number(s.duplicate_count) || 0,
+        numbers: parseJsonList(s.duplicate_numbers_json),
+      },
+      out_of_range: {
+        count: Number(s.out_of_range_count) || 0,
+        numbers: parseJsonList(s.out_of_range_numbers_json),
+      },
+      not_detected_count: Number(s.not_detected_count) || 0,
+      part_match_count: Number(s.part_match_count) || 0,
+      part_mismatch_count: Number(s.part_mismatch_count) || 0,
+      part_not_detected_count: Number(s.part_not_detected_count) || 0,
+      weight_match_count: Number(s.weight_match_count) || 0,
+      weight_mismatch_count: Number(s.weight_mismatch_count) || 0,
+      weight_not_detected_count: Number(s.weight_not_detected_count) || 0,
+    },
+    readings,
+  };
 };
 
 export const getAllSessions = async (
@@ -207,47 +260,8 @@ export const getAllSessions = async (
       return rows as SessionSummaryItem[];
     }
   } catch (err) {
-    console.warn("[Repository] Failed to query scan_sessions from database, falling back to JSON files:", err);
+    console.warn("[Repository] Failed to query scan_sessions from database:", err);
   }
-
-  // Fallback: Read JSON files from reportDirectory
-  try {
-    const files = await readdir(reportDirectory);
-    const jsonFiles = files
-      .filter((f) => f.endsWith(".json") && /^\d+\.json$/.test(f))
-      .sort((a, b) => parseInt(b, 10) - parseInt(a, 10))
-      .slice(0, Number(limit) || 100);
-
-    const summaries: SessionSummaryItem[] = [];
-    for (const file of jsonFiles) {
-      try {
-        const content = await readFile(path.join(reportDirectory, file), "utf8");
-        const parsed = JSON.parse(content) as SessionRecord;
-        summaries.push({
-          session_id: parsed.session_id || parseInt(file, 10),
-          saved_at: parsed.saved_at,
-          range_start: parsed.range?.start ?? "",
-          range_end: parsed.range?.end ?? "",
-          expected_part_number: parsed.expected_part_number ?? "",
-          expected_weight: parsed.expected_weight ?? "",
-          total_readings: parsed.summary?.total_readings ?? parsed.readings?.length ?? 0,
-          total_detected: parsed.summary?.total_detected ?? 0,
-          in_range_count: parsed.summary?.in_range?.count ?? 0,
-          duplicate_count: parsed.summary?.duplicates?.count ?? 0,
-          out_of_range_count: parsed.summary?.out_of_range?.count ?? 0,
-          not_detected_count: parsed.summary?.not_detected_count ?? 0,
-          part_match_count: parsed.summary?.part_match_count ?? 0,
-          part_mismatch_count: parsed.summary?.part_mismatch_count ?? 0,
-          weight_match_count: parsed.summary?.weight_match_count ?? 0,
-          weight_mismatch_count: parsed.summary?.weight_mismatch_count ?? 0,
-        });
-      } catch {
-        // ignore malformed files
-      }
-    }
-    return summaries;
-  } catch {
-    return [];
-  }
+  return [];
 };
 

@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, ArrowDown, ArrowUp, ArrowUpDown, Check, X } from "lucide-react";
 import {
   CameraStatusBadge,
   CheckStatusBadge,
@@ -89,10 +90,65 @@ export const SerialNumberInspection: React.FC = () => {
     message: string;
     subMessage?: string;
   }>({ show: false, status: "normal", message: "", subMessage: "" });
+  const [pendingReview, setPendingReview] = useState<{
+    type: "duplicate" | "out_of_range" | "mismatch";
+    title: string;
+    subMessage: string;
+    row: ReadingRow;
+    stepId: string;
+    nextPiece: Record<string, string>;
+    isFinalStep: boolean;
+    nextStepIndex: number;
+    nextStepLabel: string;
+    row?: ReadingRow;
+  } | null>(null);
+  const [acceptedAlertSteps, setAcceptedAlertSteps] = useState<string[]>([]);
   const cooldownRef = useRef(0);
   const awaitingClearRef = useRef(false);
+  const cycleCleanTimerRef = useRef<any>(null);
   const leftCardRef = useRef<HTMLDivElement>(null);
   const [leftCardHeight, setLeftCardHeight] = useState<number | null>(null);
+
+  const [tableSort, setTableSort] = useState<{
+    key: "serial" | "part_number" | "weight" | "status";
+    direction: "asc" | "desc";
+  } | null>(null);
+
+  const handleTableSort = (key: "serial" | "part_number" | "weight" | "status") => {
+    setTableSort((prev) => {
+      if (!prev || prev.key !== key) {
+        return { key, direction: "asc" };
+      }
+      return {
+        key,
+        direction: prev.direction === "asc" ? "desc" : "asc",
+      };
+    });
+  };
+
+  const sortedReadings = useMemo(() => {
+    if (!tableSort) return readings;
+    return [...readings].sort((a, b) => {
+      const aVal = a[tableSort.key] || "";
+      const bVal = b[tableSort.key] || "";
+
+      if (tableSort.key === "serial") {
+        const aNum = BigInt(extractDigits(aVal) || "0");
+        const bNum = BigInt(extractDigits(bVal) || "0");
+        if (aNum !== bNum) {
+          return tableSort.direction === "asc"
+            ? aNum < bNum ? -1 : 1
+            : aNum > bNum ? -1 : 1;
+        }
+      }
+
+      const cmp = String(aVal).localeCompare(String(bVal), undefined, {
+        numeric: true,
+        sensitivity: "base",
+      });
+      return tableSort.direction === "asc" ? cmp : -cmp;
+    });
+  }, [readings, tableSort]);
 
   const steps = CHECKS.filter((check) => selected[check.id]);
   const currentStep = steps[stepIndex];
@@ -306,52 +362,45 @@ export const SerialNumberInspection: React.FC = () => {
     );
   }
 
-  function finishPiece(values: Record<string, string>, alreadyAlerted = false) {
-    // Never record a piece if none of the selected checks were detected
-    const hasDetectedValue = steps.some(
-      (step) => values[step.id] && values[step.id].trim().length > 0 && values[step.id] !== "Not detected"
-    );
-    if (!hasDetectedValue) {
-      setPiece({});
-      setStepIndex(0);
-      setAttemptCount(0);
-      return;
+  function getNextStepInfo(
+    currentStepId: string,
+    currentPiece: Record<string, string>,
+  ): { nextIndex: number; nextLabel: string; isFinal: boolean } {
+    const currentIndex = steps.findIndex((s) => s.id === currentStepId);
+    if (currentIndex === -1) {
+      return { nextIndex: -1, nextLabel: "", isFinal: true };
     }
+    for (let i = currentIndex + 1; i < steps.length; i++) {
+      const step = steps[i];
+      const val = currentPiece[step.id];
+      if (!val || val.trim().length === 0 || val === "Not detected") {
+        return { nextIndex: i, nextLabel: step.label, isFinal: false };
+      }
+    }
+    return { nextIndex: -1, nextLabel: "", isFinal: true };
+  }
 
+  function buildReadingRow(values: Record<string, string>): ReadingRow {
     const serial = values.serial || (selected.serial ? "Not detected" : "Not checked");
     let status = selected.serial ? (values.serial ? "In range" : "Not detected") : "Not checked";
+
     if (values.serial) {
       const numeric = BigInt(extractDigits(values.serial));
       if (rangeStart && rangeEnd && (numeric < BigInt(rangeStart) || numeric > BigInt(rangeEnd))) {
         status = "Out of range";
-        if (!alreadyAlerted) {
-          toast.error(`Out of Range: ${serial}`, {
-            description: `Serial #${serial} is outside the allowed range (${rangeStart} – ${rangeEnd}).`,
-            duration: 4500,
-          });
-          triggerAlertFeedback("out_of_range", serial);
-        }
       } else if (
-        readings.some(
-          (item) => extractDigits(item.serial) === extractDigits(values.serial),
-        )
+        readings.some((item) => extractDigits(item.serial) === extractDigits(values.serial))
       ) {
         status = "Duplicate";
-        if (!alreadyAlerted) {
-          toast.warning(`Duplicate Serial: ${serial}`, {
-            description: `Serial #${serial} has already been recorded in this session.`,
-            duration: 4500,
-          });
-          triggerAlertFeedback("duplicate", serial);
-        }
       } else {
         status = "In range";
       }
     }
+
     const partMatched = isPartMatched(values.part || "", expectedPart);
     const capacityMatched = isCapacityMatched(values.weight || "", expectedWeight);
 
-    const row: ReadingRow = {
+    return {
       id: Date.now(),
       time: new Date().toLocaleTimeString(),
       serial,
@@ -373,18 +422,193 @@ export const SerialNumberInspection: React.FC = () => {
             ? "Matched"
             : "Mismatched",
     };
-    setReadings((items) => [row, ...items]);
+  }
+
+  function handleAcceptPending() {
+    if (!pendingReview) return;
+    const { nextPiece, isFinalStep, nextStepIndex, nextStepLabel, stepId } = pendingReview;
+
+    const updatedAcceptedAlerts = [...acceptedAlertSteps, stepId];
+    setAcceptedAlertSteps(updatedAcceptedAlerts);
+
+    if (isFinalStep) {
+      const acceptedRow = buildReadingRow(nextPiece);
+      setReadings((items) => [acceptedRow, ...items]);
+      toast.success("Piece Accepted & Added to Results", {
+        description: `Logged piece (${acceptedRow.status}) into results list.`,
+        duration: 3500,
+      });
+      setPendingReview(null);
+      setPiece({});
+      setAcceptedAlertSteps([]);
+      setStepIndex(0);
+      setAttemptCount(0);
+      setResult({
+        type: steps[0]?.id === "weight" ? "capacity" : steps[0]?.id || "serial",
+        value: null,
+        attempt: 0,
+        extraSummary: "",
+      });
+      awaitingClearRef.current = true;
+      cooldownRef.current = Date.now() + 1500;
+    } else {
+      setPiece(nextPiece);
+      setStepIndex(nextStepIndex);
+      setAttemptCount(0);
+      setPendingReview(null);
+      awaitingClearRef.current = false;
+      const nextStepId = steps[nextStepIndex]?.id;
+      const prefilledValue = nextPiece[nextStepId] || null;
+      setResult({
+        type: nextStepId === "weight" ? "capacity" : nextStepId,
+        value: prefilledValue,
+        attempt: 0,
+        extraSummary: prefilledValue
+          ? `Captured from image: ${prefilledValue}`
+          : `${currentStep?.label || "Step"} accepted with alert. Now proceed to ${nextStepLabel}.`,
+      });
+      toast.info(`Accepted — Proceed to ${nextStepLabel}`, {
+        description: `${currentStep?.label || "Step"} accepted.${prefilledValue ? ` Capacity ${prefilledValue} already captured.` : ` Please present piece for ${nextStepLabel}.`}`,
+        duration: 3500,
+      });
+      cooldownRef.current = Date.now() + 800;
+    }
+  }
+
+  function handleRejectPending() {
+    if (!pendingReview) return;
+    toast.error("Piece Rejected & Discarded", {
+      description: "Piece was discarded and NOT added to the results list.",
+      duration: 3500,
+    });
+    setPendingReview(null);
     setPiece({});
+    setAcceptedAlertSteps([]);
+    setStepIndex(0);
+    setAttemptCount(0);
+    setResult({
+      type: steps[0]?.id === "weight" ? "capacity" : steps[0]?.id || "serial",
+      value: null,
+      attempt: 0,
+      extraSummary: "",
+    });
+    awaitingClearRef.current = true;
+    cooldownRef.current = Date.now() + 1500;
+  }
+
+  useEffect(() => {
+    if (!pendingReview) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (["INPUT", "TEXTAREA", "SELECT"].includes((e.target as HTMLElement)?.tagName)) {
+        return;
+      }
+      if (e.key === "Enter" || e.key === "a" || e.key === "A") {
+        e.preventDefault();
+        handleAcceptPending();
+      } else if (e.key === "Escape" || e.key === "r" || e.key === "R") {
+        e.preventDefault();
+        handleRejectPending();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [pendingReview]);
+
+  function finishPiece(values: Record<string, string>, alreadyAlerted = false) {
+    const hasDetectedValue = steps.some(
+      (step) => values[step.id] && values[step.id].trim().length > 0 && values[step.id] !== "Not detected"
+    );
+    if (!hasDetectedValue) {
+      setPiece({});
+      setAcceptedAlertSteps([]);
+      setStepIndex(0);
+      setAttemptCount(0);
+      return;
+    }
+
+    const row = buildReadingRow(values);
+
+    const isOutOfRange = row.status === "Out of range";
+    const isDuplicate = row.status === "Duplicate";
+    const isPartMismatch = row.part_check === "Mismatched";
+    const isWeightMismatch = row.weight_check === "Mismatched";
+
+    const unacceptedSerialIssue = (isDuplicate || isOutOfRange) && !acceptedAlertSteps.includes("serial");
+    const unacceptedPartIssue = isPartMismatch && !acceptedAlertSteps.includes("part");
+    const unacceptedWeightIssue = isWeightMismatch && !acceptedAlertSteps.includes("weight");
+
+    const hasUnacceptedIssue = unacceptedSerialIssue || unacceptedPartIssue || unacceptedWeightIssue;
+
+    if (hasUnacceptedIssue) {
+      let issueType: "duplicate" | "mismatch" | "out_of_range" = "mismatch";
+      let title = "Inspection Alert";
+      let subMessage = "";
+
+      if (unacceptedSerialIssue) {
+        if (isDuplicate) {
+          issueType = "duplicate";
+          title = `Duplicate Serial: #${row.serial}`;
+          subMessage = `Serial #${row.serial} has already been recorded in this session.`;
+        } else {
+          issueType = "out_of_range";
+          title = `Serial #${row.serial} Out of Range`;
+          subMessage = `Outside allowed range (${rangeStart} – ${rangeEnd}).`;
+        }
+      } else if (unacceptedPartIssue) {
+        issueType = "mismatch";
+        title = "Part Number Mismatched";
+        subMessage = `Detected: "${values.part || "Not detected"}" • Expected: "${expectedPart}"`;
+      } else if (unacceptedWeightIssue) {
+        issueType = "mismatch";
+        title = "Weight / Capacity Mismatched";
+        subMessage = `Detected: "${values.weight || "Not detected"}" • Expected: "${expectedWeight}"`;
+      }
+
+      setPendingReview({
+        type: issueType,
+        title,
+        subMessage,
+        stepId: unacceptedSerialIssue ? "serial" : unacceptedPartIssue ? "part" : "weight",
+        nextPiece: values,
+        isFinalStep: true,
+        nextStepIndex: -1,
+        nextStepLabel: "",
+        row,
+      });
+      playAlertTone();
+      return;
+    }
+
+    setReadings((items) => [row, ...items]);
+    setPiece(values);
+    setAcceptedAlertSteps([]);
     setStepIndex(0);
     setAttemptCount(0);
     awaitingClearRef.current = true;
 
-    const isSuccess =
-      (!selected.serial || status === "In range") &&
-      (!selected.part || partMatched) &&
-      (!selected.weight || capacityMatched);
+    if (cycleCleanTimerRef.current) {
+      clearTimeout(cycleCleanTimerRef.current);
+    }
+    cycleCleanTimerRef.current = setTimeout(() => {
+      setPiece({});
+      setResult(null);
+    }, 1200);
 
-    if (isSuccess) {
+    const hasAnyIssue = isDuplicate || isOutOfRange || isPartMismatch || isWeightMismatch;
+    if (hasAnyIssue) {
+      toast.success("Piece Completed (Logged with Discrepancies)", {
+        description: `Piece recorded: ${[
+          selected.serial && values.serial ? `Serial #${values.serial}` : null,
+          selected.part && values.part ? `Part ${values.part}` : null,
+          selected.weight && values.weight ? `Capacity ${values.weight}` : null,
+        ]
+          .filter(Boolean)
+          .join(" • ")}`,
+        duration: 3500,
+      });
+    } else {
       toast.success("Piece Completed & Verified", {
         description: `Logged: ${[
           selected.serial && values.serial ? `Serial #${values.serial}` : null,
@@ -393,18 +617,22 @@ export const SerialNumberInspection: React.FC = () => {
         ]
           .filter(Boolean)
           .join(" • ")}`,
-        duration: 4000,
-      });
-    } else {
-      toast.error("Piece Logged with Discrepancies", {
-        description: "Piece recorded with inspection errors. Please check the log.",
-        duration: 4500,
+        duration: 3500,
       });
     }
   }
 
   async function readImage(image: File | null, isAuto = false) {
     if (!image || !currentStep) return;
+    if (!image || !currentStep || pendingReview !== null) return;
+    if (cycleCleanTimerRef.current) {
+      clearTimeout(cycleCleanTimerRef.current);
+      cycleCleanTimerRef.current = null;
+    }
+    if (stepIndex === 0 && Object.keys(piece).length >= steps.length) {
+      setPiece({});
+      setResult(null);
+    }
     setIsReading(true);
     setSaveError("");
     try {
@@ -430,6 +658,10 @@ export const SerialNumberInspection: React.FC = () => {
         queryParams.check_types = "weight";
       }
 
+      if (selected.weight && expectedWeight.trim()) {
+        queryParams.expected_weight = expectedWeight.trim();
+      }
+
       const response = await readSerialMutation.mutateAsync({
         formData: form,
         queryParams,
@@ -439,9 +671,12 @@ export const SerialNumberInspection: React.FC = () => {
         response?.data !== undefined ? response.data : response
       ) as unknown as OcrResponseData;
 
-      const detectedValues: Record<string, string | null> = data?.values || {
-        [data?.check_type || currentStep.id]: data?.value || null,
-      };
+      const detectedValues: Record<string, string | null> =
+        (data as any)?.values ||
+        (response as any)?.data?.values ||
+        (response as any)?.values || {
+          [data?.check_type || currentStep.id]: data?.value || null,
+        };
 
       let value = detectedValues[currentStep.id] || null;
 
@@ -453,20 +688,15 @@ export const SerialNumberInspection: React.FC = () => {
       } else if (currentStep.id === "part") {
         value = value || data?.value || null;
       } else if (currentStep.id === "weight") {
-        value = normalizeWeight(value || data?.value || null);
+        const detectedW =
+          detectedValues.weight ||
+          (data?.check_type === "weight" ? data?.value : null) ||
+          piece.weight ||
+          null;
+        value = detectedW ? normalizeWeight(detectedW) : null;
       }
 
       const attempt = attemptCount + 1;
-
-      let extraSummary = "";
-      if (
-        currentStep.id === "serial" &&
-        selected.weight &&
-        detectedValues.weight &&
-        !piece.weight
-      ) {
-        extraSummary = `Also captured Capacity: ${detectedValues.weight} (Step 3 auto-completes)`;
-      }
 
       if (!value) {
         if (isAuto) {
@@ -475,6 +705,8 @@ export const SerialNumberInspection: React.FC = () => {
           // clear the flag so the next piece can be detected.
           if (awaitingClearRef.current) {
             awaitingClearRef.current = false;
+            setPiece({});
+            setResult(null);
           }
           // Auto-scanning continues running until something is detected.
           // Do NOT record, do NOT advance steps, do NOT limit to 3 attempts.
@@ -513,6 +745,22 @@ export const SerialNumberInspection: React.FC = () => {
         return;
       }
 
+      const rawWeight =
+        selected.weight && (detectedValues.weight || (data?.check_type === "weight" ? data?.value : null))
+          ? normalizeWeight(detectedValues.weight || data?.value)
+          : piece.weight || null;
+
+      const weightMatches =
+        Boolean(rawWeight) &&
+        (!expectedWeight.trim() || isCapacityMatched(rawWeight!, expectedWeight.trim()));
+
+      let extraSummary = "";
+      if (currentStep.id === "serial" && rawWeight) {
+        extraSummary = `Capacity: ${rawWeight}`;
+      } else if (currentStep.id === "weight" && (piece.serial || detectedValues.serial)) {
+        extraSummary = `Serial: #${piece.serial || detectedValues.serial}`;
+      }
+
       setResult({
         type: currentStep.id === "weight" ? "capacity" : currentStep.id,
         value,
@@ -524,11 +772,11 @@ export const SerialNumberInspection: React.FC = () => {
       let successMsg = "✓ Verified - OK";
       let successSubMsg = "";
 
-      const bothSerialAndWeightCaptured =
+      const bothSerialAndWeightValid =
         currentStep.id === "serial" &&
+        !selected.part &&
         selected.weight &&
-        Boolean(detectedValues.weight) &&
-        !piece.weight;
+        weightMatches;
 
       if (currentStep.id === "serial" && value) {
         const numeric = BigInt(extractDigits(value));
@@ -548,31 +796,20 @@ export const SerialNumberInspection: React.FC = () => {
           });
           triggerAlertFeedback("duplicate", `Serial #${value}`, "Already recorded in this session");
           alreadyAlerted = true;
-        } else if (bothSerialAndWeightCaptured) {
-          const weightVal = detectedValues.weight!;
-          const capMatched = isCapacityMatched(weightVal, expectedWeight);
-          if (expectedWeight && !capMatched) {
-            toast.error(`Capacity Mismatched: ${weightVal}`, {
-              description: `Serial #${value} verified, but Capacity ${weightVal} does not match expected ${expectedWeight}.`,
-              duration: 4500,
-            });
-            triggerAlertFeedback("mismatch", "Weight Mismatched", `Detected: ${weightVal} • Expected: ${expectedWeight}`);
-            alreadyAlerted = true;
-          } else {
-            toast.success("Serial & Weight Captured & Verified", {
-              description: `Serial #${value} & Weight ${weightVal} both verified successfully.`,
-              duration: 3500,
-            });
-            successMsg = "✓ Serial & Weight Verified - OK";
-            successSubMsg = `Serial: #${value} • Weight: ${weightVal}`;
-          }
+        } else if (bothSerialAndWeightValid) {
+          toast.success("Serial & Weight Captured & Verified", {
+            description: `Serial #${value} & Capacity ${rawWeight} both verified in same image.`,
+            duration: 3500,
+          });
+          successMsg = "✓ Serial & Weight Verified - OK";
+          successSubMsg = `Serial: #${value} • Weight: ${rawWeight}`;
         } else {
           toast.success("Serial Number Captured & Verified", {
             description: `Serial #${value}${rangeStart && rangeEnd ? ` is within range (${rangeStart} – ${rangeEnd})` : " verified"}`,
             duration: 3500,
           });
           successMsg = "✓ Serial Number Verified - OK";
-          successSubMsg = `Serial: #${value}`;
+          successSubMsg = `Serial: #${value}${rawWeight ? ` • Capacity: ${rawWeight}` : ""}`;
         }
       } else if (currentStep.id === "part" && value) {
         const partMatched = isPartMatched(value, expectedPart);
@@ -617,33 +854,74 @@ export const SerialNumberInspection: React.FC = () => {
       setAttemptCount(0);
 
       const nextPiece: Record<string, string> = { ...piece, [currentStep.id]: value };
-
-      if (bothSerialAndWeightCaptured && detectedValues.weight) {
-        nextPiece.weight = detectedValues.weight;
+      if (rawWeight) {
+        nextPiece.weight = rawWeight;
       }
 
-      if (currentStep.id === "serial") {
-        if (selected.part) {
-          const partIndex = steps.findIndex((s) => s.id === "part");
-          setPiece(nextPiece);
-          setStepIndex(partIndex);
-        } else if (selected.weight && !nextPiece.weight) {
-          const weightIndex = steps.findIndex((s) => s.id === "weight");
-          setPiece(nextPiece);
-          setStepIndex(weightIndex);
-        } else {
-          finishPiece(nextPiece, alreadyAlerted);
+      const allStepsSatisfied = steps.every((s) => {
+        const v = nextPiece[s.id];
+        return Boolean(v && v.trim().length > 0 && v !== "Not detected");
+      });
+
+      if (!alreadyAlerted && allStepsSatisfied) {
+        finishPiece(nextPiece, false);
+        return;
+      }
+
+      if (alreadyAlerted) {
+        const nextInfo = getNextStepInfo(currentStep.id, nextPiece);
+        const row = buildReadingRow(nextPiece);
+
+        let issueType: "duplicate" | "mismatch" | "out_of_range" = "mismatch";
+        let title = "Inspection Alert";
+        let subMessage = "";
+
+        if (currentStep.id === "serial") {
+          const numeric = BigInt(extractDigits(value));
+          if (rangeStart && rangeEnd && (numeric < BigInt(rangeStart) || numeric > BigInt(rangeEnd))) {
+            issueType = "out_of_range";
+            title = `Serial #${value} Out of Range`;
+            subMessage = `Outside allowed range (${rangeStart} – ${rangeEnd}).`;
+          } else if (
+            readings.some((item) => extractDigits(item.serial) === extractDigits(value))
+          ) {
+            issueType = "duplicate";
+            title = `Duplicate Serial: #${value}`;
+            subMessage = `Serial #${value} has already been recorded in this session.`;
+          }
+        } else if (currentStep.id === "part") {
+          issueType = "mismatch";
+          title = "Part Number Mismatched";
+          subMessage = `Detected: "${value}" • Expected: "${expectedPart}"`;
+        } else if (currentStep.id === "weight") {
+          issueType = "mismatch";
+          title = "Weight / Capacity Mismatched";
+          subMessage = `Detected: "${value}" • Expected: "${expectedWeight}"`;
         }
-      } else if (currentStep.id === "part") {
-        if (selected.weight && !nextPiece.weight) {
-          const weightIndex = steps.findIndex((s) => s.id === "weight");
-          setPiece(nextPiece);
-          setStepIndex(weightIndex);
-        } else {
-          finishPiece(nextPiece, alreadyAlerted);
-        }
+
+        setPendingReview({
+          type: issueType,
+          title,
+          subMessage,
+          stepId: currentStep.id,
+          nextPiece,
+          isFinalStep: nextInfo.isFinal,
+          nextStepIndex: nextInfo.nextIndex,
+          nextStepLabel: nextInfo.nextLabel,
+          row,
+        });
+        playAlertTone();
+        return;
+      }
+
+      const nextInfo = getNextStepInfo(currentStep.id, nextPiece);
+      if (!nextInfo.isFinal && nextInfo.nextIndex !== -1) {
+        setPiece(nextPiece);
+        setStepIndex(nextInfo.nextIndex);
+        setAttemptCount(0);
+        cooldownRef.current = Date.now() + 800;
       } else {
-        finishPiece(nextPiece, alreadyAlerted);
+        finishPiece(nextPiece, false);
       }
     } catch (error: any) {
       if (!isAuto) {
@@ -664,14 +942,14 @@ export const SerialNumberInspection: React.FC = () => {
 
   // Auto-Capture Loop
   useEffect(() => {
-    if (!autoCapture || !started || finished || !cameraReady || isReading) return;
+    if (!autoCapture || !started || finished || !cameraReady || isReading || pendingReview !== null) return;
     let active = true;
     const interval = setInterval(async () => {
-      if (!active) return;
+      if (!active || pendingReview !== null) return;
       if (Date.now() < cooldownRef.current) return;
       if (isReading) return;
       const photo = await capturePhoto();
-      if (photo && active) {
+      if (photo && active && pendingReview === null) {
         await readImage(photo, true);
       }
     }, 1200);
@@ -686,6 +964,7 @@ export const SerialNumberInspection: React.FC = () => {
     finished,
     cameraReady,
     isReading,
+    pendingReview,
     currentStep,
     piece,
     steps,
@@ -722,9 +1001,14 @@ export const SerialNumberInspection: React.FC = () => {
   }
 
   function reset() {
+    if (cycleCleanTimerRef.current) {
+      clearTimeout(cycleCleanTimerRef.current);
+      cycleCleanTimerRef.current = null;
+    }
     setFinished(false);
     setSavedSession(null);
     setReadings([]);
+    setTableSort(null);
     setResult(null);
     setPiece({});
     setStepIndex(0);
@@ -1053,10 +1337,10 @@ export const SerialNumberInspection: React.FC = () => {
                       }}
                       className="w-full h-full object-contain bg-slate-950"
                     />
-                    {autoCapture && cameraReady && !isReading && (
+                    {autoCapture && cameraReady && !isReading && !pendingReview && (
                       <div className="scan-laser-line"></div>
                     )}
-                    {captureFlash.show && (
+                    {captureFlash.show && !pendingReview && (
                       <div
                         className={`absolute inset-0 backdrop-blur-[3px] border-4 flex flex-col items-center justify-center transition-all z-20 p-4 text-center ${
                           captureFlash.status === "duplicate"
@@ -1083,6 +1367,76 @@ export const SerialNumberInspection: React.FC = () => {
                               {captureFlash.subMessage}
                             </span>
                           )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Pending Review Prompt Overlay (Accept / Reject) */}
+                    {pendingReview && (
+                      <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-md flex flex-col items-center justify-center p-3 sm:p-4 z-30 animate-in fade-in duration-150">
+                        <div
+                          className={`w-full max-w-sm sm:max-w-md rounded-2xl border p-4 sm:p-5 shadow-2xl text-center space-y-3 sm:space-y-3.5 animate-in zoom-in-95 duration-200 ${
+                            pendingReview.type === "duplicate"
+                              ? "bg-amber-950/95 border-amber-500/70 text-amber-50 shadow-amber-950/60"
+                              : "bg-rose-950/95 border-rose-500/70 text-rose-50 shadow-rose-950/60"
+                          }`}
+                        >
+                          {/* Alert Icon & Type Badge */}
+                          <div className="flex flex-col items-center gap-1.5">
+                            <div
+                              className={`w-11 h-11 rounded-full flex items-center justify-center shadow-inner ${
+                                pendingReview.type === "duplicate"
+                                  ? "bg-amber-500/25 text-amber-400 border border-amber-400/50"
+                                  : "bg-rose-500/25 text-rose-400 border border-rose-400/50"
+                              }`}
+                            >
+                              <AlertTriangle className="w-6 h-6 stroke-[2.2]" />
+                            </div>
+                            <span
+                              className={`text-[10px] font-black uppercase tracking-widest px-2.5 py-0.5 rounded-full border ${
+                                pendingReview.type === "duplicate"
+                                  ? "bg-amber-500/20 border-amber-400/50 text-amber-300"
+                                  : "bg-rose-500/20 border-rose-400/50 text-rose-300"
+                              }`}
+                            >
+                              {pendingReview.type === "duplicate"
+                                ? "Duplicate Detected"
+                                : pendingReview.type === "out_of_range"
+                                  ? "Serial Out of Range"
+                                  : "Mismatch Detected"}
+                            </span>
+                          </div>
+
+                          {/* Title */}
+                          <div>
+                            <h3 className="text-base sm:text-lg font-black tracking-tight text-white leading-tight">
+                              {pendingReview.title}
+                            </h3>
+                          </div>
+
+                          {/* Action Buttons: Reject & Accept */}
+                          <div className="grid grid-cols-2 gap-2.5 pt-1">
+                            <button
+                              type="button"
+                              onClick={handleRejectPending}
+                              className="py-2.5 sm:py-3 px-3 sm:px-4 rounded-xl bg-rose-600 hover:bg-rose-500 active:scale-95 text-white font-bold text-xs sm:text-sm transition shadow-lg shadow-rose-900/40 flex items-center justify-center gap-1.5 cursor-pointer border border-rose-400/50"
+                            >
+                              <X className="w-4 h-4 stroke-[2.5]" />
+                              <span>Reject (Discard)</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleAcceptPending}
+                              className="py-2.5 sm:py-3 px-3 sm:px-4 rounded-xl bg-[#2da755] hover:bg-[#258e47] active:scale-95 text-white font-bold text-xs sm:text-sm transition shadow-lg shadow-[#2da755]/30 flex items-center justify-center gap-1.5 cursor-pointer border border-emerald-400/50"
+                            >
+                              <Check className="w-4 h-4 stroke-[2.5]" />
+                              <span>
+                                {pendingReview.isFinalStep
+                                  ? "Accept (Add to Results)"
+                                  : `Accept & Next (${pendingReview.nextStepLabel})`}
+                              </span>
+                            </button>
+                          </div>
                         </div>
                       </div>
                     )}
@@ -1122,22 +1476,35 @@ export const SerialNumberInspection: React.FC = () => {
 
               {/* Capture Action Button */}
               <button
-                disabled={!configurationReady || finished || isReading || !cameraReady}
+                disabled={!configurationReady || finished || isReading || !cameraReady || pendingReview !== null}
                 onClick={captureAndRead}
                 className="w-full py-3 px-4 bg-[#2da755] hover:bg-[#258e47] active:scale-[0.99] text-white font-bold rounded-xl transition flex items-center justify-center gap-2 shadow-sm text-sm disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
               >
                 <ScanIcon />
                 <span className="truncate">
-                  {isReading
-                    ? "Reading…"
-                    : autoCapture
-                      ? "Capture now (Manual click)"
-                      : `Capture ${currentStep?.label || ""}`}
+                  {pendingReview !== null
+                    ? "Reviewing piece anomaly…"
+                    : isReading
+                      ? "Reading…"
+                      : autoCapture
+                        ? "Capture now (Manual click)"
+                        : piece[currentStep?.id || ""]
+                          ? `Confirm & Complete ${currentStep?.label || ""} (${piece[currentStep?.id || ""]})`
+                          : `Capture ${currentStep?.label || ""}`}
                 </span>
               </button>
 
               {/* Detected Value Card */}
               <DetectedValueCard
+                steps={steps}
+                stepIndex={stepIndex}
+                piece={piece}
+                lastCompletedRow={readings[0] || null}
+                isReading={isReading}
+                rangeStart={rangeStart}
+                rangeEnd={rangeEnd}
+                expectedPart={expectedPart}
+                expectedWeight={expectedWeight}
                 result={result}
                 attemptCount={attemptCount}
                 hasPieceData={Object.keys(piece).length > 0}
@@ -1170,13 +1537,76 @@ export const SerialNumberInspection: React.FC = () => {
                 </div>
               ) : (
                 <div className="flex-1 overflow-y-auto min-h-0 border border-[#d6ebd9] rounded-xl divide-y divide-[#edf5f0]">
-                  <div className="grid grid-cols-4 bg-[#f9fbf9] px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 sticky top-0 z-10 border-b border-[#d6ebd9]">
-                    <span>Serial</span>
-                    <span>Part #</span>
-                    <span>Capacity</span>
-                    <span>Status</span>
+                  <div className="grid grid-cols-4 bg-[#f9fbf9] px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 sticky top-0 z-10 border-b border-[#d6ebd9] select-none">
+                    <button
+                      type="button"
+                      onClick={() => handleTableSort("serial")}
+                      className="flex items-center gap-1 hover:text-slate-900 cursor-pointer font-bold uppercase tracking-wider text-[10px] text-left transition-colors"
+                    >
+                      <span>Serial</span>
+                      {tableSort?.key === "serial" ? (
+                        tableSort.direction === "asc" ? (
+                          <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                        ) : (
+                          <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleTableSort("part_number")}
+                      className="flex items-center gap-1 hover:text-slate-900 cursor-pointer font-bold uppercase tracking-wider text-[10px] text-left transition-colors"
+                    >
+                      <span>Part #</span>
+                      {tableSort?.key === "part_number" ? (
+                        tableSort.direction === "asc" ? (
+                          <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                        ) : (
+                          <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleTableSort("weight")}
+                      className="flex items-center gap-1 hover:text-slate-900 cursor-pointer font-bold uppercase tracking-wider text-[10px] text-left transition-colors"
+                    >
+                      <span>Capacity</span>
+                      {tableSort?.key === "weight" ? (
+                        tableSort.direction === "asc" ? (
+                          <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                        ) : (
+                          <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleTableSort("status")}
+                      className="flex items-center gap-1 hover:text-slate-900 cursor-pointer font-bold uppercase tracking-wider text-[10px] text-left transition-colors"
+                    >
+                      <span>Status</span>
+                      {tableSort?.key === "status" ? (
+                        tableSort.direction === "asc" ? (
+                          <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                        ) : (
+                          <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                      )}
+                    </button>
                   </div>
-                  {readings.map((row) => {
+                  {sortedReadings.map((row) => {
                     const statusBg =
                       row.status === "In range"
                         ? "border-l-4 border-l-[#2da755] bg-[#def7ec]/30"
@@ -1243,7 +1673,7 @@ export const SerialNumberInspection: React.FC = () => {
 
                 {savedSession && (
                   <div className="p-2 rounded-xl bg-[#def7ec] border border-[#bcf0da] text-[#03543f] text-[11px] font-semibold text-center">
-                    Saved to MySQL and JSON · ID{" "}
+                    Saved to MySQL · ID{" "}
                     <strong className="font-mono">{savedSession.session_id}</strong>
                   </div>
                 )}

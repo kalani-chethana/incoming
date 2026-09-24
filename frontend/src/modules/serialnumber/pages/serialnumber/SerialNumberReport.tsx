@@ -1,7 +1,10 @@
 import React, { useMemo, useState } from "react";
 import {
   Activity,
+  ArrowDown,
   ArrowLeft,
+  ArrowUp,
+  ArrowUpDown,
   Calendar,
   CheckCircle2,
   ChevronRight,
@@ -17,6 +20,7 @@ import {
   CheckStatusBadge,
   ReadingStatusBadge,
 } from "../../components";
+import { extractDigits } from "../../libs/normalization";
 import {
   downloadCsvBlob,
   useSessionQuery,
@@ -67,6 +71,113 @@ export const SerialNumberReport: React.FC = () => {
       return idMatch || partMatch || weightMatch || rangeMatch;
     });
   }, [sessionsList, filterQuery]);
+
+  // Sorting state for Historical Sessions Table
+  const [sessionsSort, setSessionsSort] = useState<{
+    key: keyof SessionSummaryItem;
+    direction: "asc" | "desc";
+  }>({
+    key: "session_id",
+    direction: "desc",
+  });
+
+  const handleSessionsSort = (key: keyof SessionSummaryItem) => {
+    setSessionsSort((prev) => ({
+      key,
+      direction: prev.key === key && prev.direction === "asc" ? "desc" : "asc",
+    }));
+  };
+
+  const sortedSessions = useMemo(() => {
+    return [...filteredSessions].sort((a, b) => {
+      const aVal = a[sessionsSort.key];
+      const bVal = b[sessionsSort.key];
+
+      const numericKeys = [
+        "session_id",
+        "total_readings",
+        "total_detected",
+        "in_range_count",
+        "out_of_range_count",
+        "duplicate_count",
+        "not_detected_count",
+        "part_match_count",
+        "part_mismatch_count",
+        "weight_match_count",
+        "weight_mismatch_count",
+      ];
+
+      if (numericKeys.includes(String(sessionsSort.key))) {
+        const aNum = Number(aVal) || 0;
+        const bNum = Number(bVal) || 0;
+        return sessionsSort.direction === "asc" ? aNum - bNum : bNum - aNum;
+      }
+
+      if (sessionsSort.key === "saved_at") {
+        const aTime = new Date(String(aVal)).getTime() || 0;
+        const bTime = new Date(String(bVal)).getTime() || 0;
+        return sessionsSort.direction === "asc" ? aTime - bTime : bTime - aTime;
+      }
+
+      const cmp = String(aVal ?? "").localeCompare(String(bVal ?? ""), undefined, {
+        numeric: true,
+        sensitivity: "base",
+      });
+      return sessionsSort.direction === "asc" ? cmp : -cmp;
+    });
+  }, [filteredSessions, sessionsSort]);
+
+  // Sorting state for Single Session Readings Table
+  const [readingsSort, setReadingsSort] = useState<{
+    key: "index" | "serial" | "part_number" | "weight" | "status";
+    direction: "asc" | "desc";
+  }>({
+    key: "index",
+    direction: "asc",
+  });
+
+  const handleReadingsSort = (
+    key: "index" | "serial" | "part_number" | "weight" | "status",
+  ) => {
+    setReadingsSort((prev) => ({
+      key,
+      direction: prev.key === key && prev.direction === "asc" ? "desc" : "asc",
+    }));
+  };
+
+  const sortedReadings = useMemo(() => {
+    if (!activeRecord?.readings) return [];
+    const withOriginalIndex = activeRecord.readings.map((r, idx) => ({
+      ...r,
+      _originalIndex: idx + 1,
+    }));
+
+    return withOriginalIndex.sort((a, b) => {
+      if (readingsSort.key === "index") {
+        return readingsSort.direction === "asc"
+          ? a._originalIndex - b._originalIndex
+          : b._originalIndex - a._originalIndex;
+      }
+
+      if (readingsSort.key === "serial") {
+        const aNum = BigInt(extractDigits(a.serial) || "0");
+        const bNum = BigInt(extractDigits(b.serial) || "0");
+        if (aNum !== bNum) {
+          return readingsSort.direction === "asc"
+            ? aNum < bNum ? -1 : 1
+            : aNum > bNum ? -1 : 1;
+        }
+      }
+
+      const aVal = String(a[readingsSort.key] || "");
+      const bVal = String(b[readingsSort.key] || "");
+      const cmp = aVal.localeCompare(bVal, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      });
+      return readingsSort.direction === "asc" ? cmp : -cmp;
+    });
+  }, [activeRecord?.readings, readingsSort]);
 
   const handleDownload = async (sessionId: number, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
@@ -151,7 +262,7 @@ export const SerialNumberReport: React.FC = () => {
               <div>
                 <div className="flex items-center gap-2">
                   <span className="font-mono font-black text-slate-900 text-base">
-                    Session #{activeSessionId}
+                    Session {activeSessionId}
                   </span>
                   <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-[#e8f7ec] text-[#22c55e] border border-[#bcf0da] rounded-md">
                     Active Details
@@ -186,14 +297,14 @@ export const SerialNumberReport: React.FC = () => {
           {/* Loading Single Session */}
           {isLoadingSingle && (
             <div className="bg-white border border-[#d6ebd9] rounded-2xl p-12 text-center text-xs text-slate-500 font-medium animate-pulse">
-              Loading session #{activeSessionId} details…
+              Loading session {activeSessionId} details…
             </div>
           )}
 
           {/* Error Single Session */}
           {isErrorSingle && (
             <div className="bg-[#fee2e2]/40 border border-[#fecaca] rounded-2xl p-6 text-center text-xs text-[#dc2626] font-medium">
-              {(singleError as Error)?.message || `Failed to load details for session #${activeSessionId}.`}
+              {(singleError as Error)?.message || `Failed to load details for session ${activeSessionId}.`}
             </div>
           )}
 
@@ -287,7 +398,7 @@ export const SerialNumberReport: React.FC = () => {
                       Session ID
                     </span>
                     <span className="font-mono font-bold text-slate-800 text-sm">
-                      #{activeRecord.session_id}
+                      {activeRecord.session_id}
                     </span>
                   </div>
                   <div>
@@ -353,19 +464,99 @@ export const SerialNumberReport: React.FC = () => {
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse">
                     <thead>
-                      <tr className="border-b border-[#d6ebd9]/80 text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-[#f9fbf9]">
-                        <th className="py-3 px-4">#</th>
-                        <th className="py-3 px-4">Serial Number</th>
-                        <th className="py-3 px-4">Part Number</th>
-                        <th className="py-3 px-4">Weight / Capacity</th>
-                        <th className="py-3 px-4">Status</th>
+                      <tr className="border-b border-[#d6ebd9]/80 text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-[#f9fbf9] select-none">
+                        <th
+                          onClick={() => handleReadingsSort("index")}
+                          className="py-3 px-4 cursor-pointer hover:bg-slate-100 transition"
+                        >
+                          <div className="flex items-center gap-1">
+                            <span>#</span>
+                            {readingsSort.key === "index" ? (
+                              readingsSort.direction === "asc" ? (
+                                <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                              ) : (
+                                <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                              )
+                            ) : (
+                              <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                            )}
+                          </div>
+                        </th>
+                        <th
+                          onClick={() => handleReadingsSort("serial")}
+                          className="py-3 px-4 cursor-pointer hover:bg-slate-100 transition"
+                        >
+                          <div className="flex items-center gap-1">
+                            <span>Serial Number</span>
+                            {readingsSort.key === "serial" ? (
+                              readingsSort.direction === "asc" ? (
+                                <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                              ) : (
+                                <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                              )
+                            ) : (
+                              <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                            )}
+                          </div>
+                        </th>
+                        <th
+                          onClick={() => handleReadingsSort("part_number")}
+                          className="py-3 px-4 cursor-pointer hover:bg-slate-100 transition"
+                        >
+                          <div className="flex items-center gap-1">
+                            <span>Part Number</span>
+                            {readingsSort.key === "part_number" ? (
+                              readingsSort.direction === "asc" ? (
+                                <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                              ) : (
+                                <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                              )
+                            ) : (
+                              <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                            )}
+                          </div>
+                        </th>
+                        <th
+                          onClick={() => handleReadingsSort("weight")}
+                          className="py-3 px-4 cursor-pointer hover:bg-slate-100 transition"
+                        >
+                          <div className="flex items-center gap-1">
+                            <span>Weight / Capacity</span>
+                            {readingsSort.key === "weight" ? (
+                              readingsSort.direction === "asc" ? (
+                                <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                              ) : (
+                                <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                              )
+                            ) : (
+                              <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                            )}
+                          </div>
+                        </th>
+                        <th
+                          onClick={() => handleReadingsSort("status")}
+                          className="py-3 px-4 cursor-pointer hover:bg-slate-100 transition"
+                        >
+                          <div className="flex items-center gap-1">
+                            <span>Status</span>
+                            {readingsSort.key === "status" ? (
+                              readingsSort.direction === "asc" ? (
+                                <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                              ) : (
+                                <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                              )
+                            ) : (
+                              <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                            )}
+                          </div>
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#edf5f0] text-xs">
-                      {activeRecord.readings?.map((row, idx) => (
-                        <tr key={idx} className="hover:bg-[#f4f9f5] transition-colors">
+                      {sortedReadings.map((row) => (
+                        <tr key={row._originalIndex} className="hover:bg-[#f4f9f5] transition-colors">
                           <td className="py-3 px-4 text-slate-400 font-mono text-[11px]">
-                            {idx + 1}
+                            {row._originalIndex}
                           </td>
                           <td className="py-3 px-4 whitespace-nowrap">
                             <span className="font-mono font-bold text-xs px-2 py-0.5 rounded bg-[#fee2e2]/70 text-[#dc2626] border border-[#fecaca] inline-block">
@@ -459,21 +650,165 @@ export const SerialNumberReport: React.FC = () => {
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
-                <tr className="border-b border-[#d6ebd9]/80 text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-[#f9fbf9]">
-                  <th className="py-3 px-4">Session ID</th>
-                  <th className="py-3 px-4">Date & Time</th>
-                  <th className="py-3 px-4">Serial Range</th>
-                  <th className="py-3 px-4">Expected Part #</th>
-                  <th className="py-3 px-4">Expected Weight / Cap</th>
-                  <th className="py-3 px-4 text-center">Total Pieces</th>
-                  <th className="py-3 px-4 text-center">In Range</th>
-                  <th className="py-3 px-4 text-center">Out of Range</th>
-                  <th className="py-3 px-4 text-center">Duplicates</th>
+                <tr className="border-b border-[#d6ebd9]/80 text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-[#f9fbf9] select-none">
+                  <th
+                    onClick={() => handleSessionsSort("session_id")}
+                    className="py-3 px-4 cursor-pointer hover:bg-slate-100 transition"
+                  >
+                    <div className="flex items-center gap-1">
+                      <span>Session ID</span>
+                      {sessionsSort.key === "session_id" ? (
+                        sessionsSort.direction === "asc" ? (
+                          <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                        ) : (
+                          <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                      )}
+                    </div>
+                  </th>
+                  <th
+                    onClick={() => handleSessionsSort("saved_at")}
+                    className="py-3 px-4 cursor-pointer hover:bg-slate-100 transition"
+                  >
+                    <div className="flex items-center gap-1">
+                      <span>Date & Time</span>
+                      {sessionsSort.key === "saved_at" ? (
+                        sessionsSort.direction === "asc" ? (
+                          <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                        ) : (
+                          <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                      )}
+                    </div>
+                  </th>
+                  <th
+                    onClick={() => handleSessionsSort("range_start")}
+                    className="py-3 px-4 cursor-pointer hover:bg-slate-100 transition"
+                  >
+                    <div className="flex items-center gap-1">
+                      <span>Serial Range</span>
+                      {sessionsSort.key === "range_start" ? (
+                        sessionsSort.direction === "asc" ? (
+                          <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                        ) : (
+                          <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                      )}
+                    </div>
+                  </th>
+                  <th
+                    onClick={() => handleSessionsSort("expected_part_number")}
+                    className="py-3 px-4 cursor-pointer hover:bg-slate-100 transition"
+                  >
+                    <div className="flex items-center gap-1">
+                      <span>Expected Part #</span>
+                      {sessionsSort.key === "expected_part_number" ? (
+                        sessionsSort.direction === "asc" ? (
+                          <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                        ) : (
+                          <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                      )}
+                    </div>
+                  </th>
+                  <th
+                    onClick={() => handleSessionsSort("expected_weight")}
+                    className="py-3 px-4 cursor-pointer hover:bg-slate-100 transition"
+                  >
+                    <div className="flex items-center gap-1">
+                      <span>Expected Weight / Cap</span>
+                      {sessionsSort.key === "expected_weight" ? (
+                        sessionsSort.direction === "asc" ? (
+                          <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                        ) : (
+                          <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                      )}
+                    </div>
+                  </th>
+                  <th
+                    onClick={() => handleSessionsSort("total_readings")}
+                    className="py-3 px-4 text-center cursor-pointer hover:bg-slate-100 transition"
+                  >
+                    <div className="flex items-center justify-center gap-1">
+                      <span>Total Pieces</span>
+                      {sessionsSort.key === "total_readings" ? (
+                        sessionsSort.direction === "asc" ? (
+                          <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                        ) : (
+                          <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                      )}
+                    </div>
+                  </th>
+                  <th
+                    onClick={() => handleSessionsSort("in_range_count")}
+                    className="py-3 px-4 text-center cursor-pointer hover:bg-slate-100 transition"
+                  >
+                    <div className="flex items-center justify-center gap-1">
+                      <span>In Range</span>
+                      {sessionsSort.key === "in_range_count" ? (
+                        sessionsSort.direction === "asc" ? (
+                          <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                        ) : (
+                          <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                      )}
+                    </div>
+                  </th>
+                  <th
+                    onClick={() => handleSessionsSort("out_of_range_count")}
+                    className="py-3 px-4 text-center cursor-pointer hover:bg-slate-100 transition"
+                  >
+                    <div className="flex items-center justify-center gap-1">
+                      <span>Out of Range</span>
+                      {sessionsSort.key === "out_of_range_count" ? (
+                        sessionsSort.direction === "asc" ? (
+                          <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                        ) : (
+                          <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                      )}
+                    </div>
+                  </th>
+                  <th
+                    onClick={() => handleSessionsSort("duplicate_count")}
+                    className="py-3 px-4 text-center cursor-pointer hover:bg-slate-100 transition"
+                  >
+                    <div className="flex items-center justify-center gap-1">
+                      <span>Duplicates</span>
+                      {sessionsSort.key === "duplicate_count" ? (
+                        sessionsSort.direction === "asc" ? (
+                          <ArrowUp className="w-3 h-3 text-[#2da755]" />
+                        ) : (
+                          <ArrowDown className="w-3 h-3 text-[#2da755]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-60" />
+                      )}
+                    </div>
+                  </th>
                   <th className="py-3 px-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#edf5f0] text-xs">
-                {filteredSessions.map((session) => {
+                {sortedSessions.map((session) => {
                   const isSelected = activeSessionId === session.session_id;
                   return (
                     <tr
@@ -487,12 +822,12 @@ export const SerialNumberReport: React.FC = () => {
                           ? "bg-[#e8f7ec] font-semibold text-slate-900"
                           : "hover:bg-[#f0f9f2] text-slate-700"
                       }`}
-                      title={`Click to view Session #${session.session_id} full details`}
+                      title={`Click to view Session ${session.session_id} full details`}
                     >
                       {/* Session ID */}
                       <td className="py-3.5 px-4 whitespace-nowrap">
                         <span className="font-mono font-black text-xs px-2.5 py-1 rounded-lg bg-[#2da755]/10 text-[#1b4d2b] border border-[#2da755]/20 inline-flex items-center gap-1">
-                          #{session.session_id}
+                          {session.session_id}
                         </span>
                       </td>
 

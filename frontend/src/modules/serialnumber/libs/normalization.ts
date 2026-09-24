@@ -50,24 +50,53 @@ export function isPartMatched(actual: string, expected: string): boolean {
 export function normalizeCapacity(value: string): string {
   if (!value) return "";
   let clean = value.trim().toUpperCase().replace(/\s+/g, "");
-  // Normalize OCR / typing variations: 251b, 25ib, 25lbs -> 25LB
-  clean = clean.replace(/(\d+)(?:1B|IB|LBS?)$/i, "$1LB");
-  clean = clean.replace(/(\d+)(?:KGS?|K9)$/i, "$1KG");
+  // Normalize KLB variations: 1k1b, 1kib, 1klbs, 1kb -> 1KLB
+  clean = clean.replace(/(\d+(?:\.\d+)?)(?:K(?:1B|IB|LB)S?|KB)$/i, "$1KLB");
+  // Normalize force units: KGF & LBF
+  clean = clean.replace(/(\d+(?:\.\d+)?)(?:KGF)$/i, "$1KGF");
+  clean = clean.replace(/(\d+(?:\.\d+)?)(?:LBF)$/i, "$1LBF");
+  // Normalize LB variations: 251b, 25ib, 25lbs -> 25LB
+  clean = clean.replace(/(\d+(?:\.\d+)?)(?:1B|IB|LBS?)$/i, "$1LB");
+  // Normalize KG variations: 50kgs, 50k9 -> 50KG
+  clean = clean.replace(/(\d+(?:\.\d+)?)(?:KGS?|K9)$/i, "$1KG");
+  // Normalize KN & N (Kilonewton & Newton)
+  clean = clean.replace(/(\d+(?:\.\d+)?)(?:KN)$/i, "$1KN");
+  clean = clean.replace(/(\d+(?:\.\d+)?)(?:N)$/i, "$1N");
+  // Normalize Metric Tonne & Gram
+  clean = clean.replace(/(\d+(?:\.\d+)?)(?:TONNE?S?|T)$/i, "$1T");
+  clean = clean.replace(/(\d+(?:\.\d+)?)(?:GRAMS?|G)$/i, "$1G");
   return clean;
 }
 
 export const normalizeWeight = normalizeCapacity;
 
 export function isCapacityMatched(actual: string, expected: string): boolean {
-  if (!actual || !expected) return false;
+  if (!actual) return false;
+  if (!expected || !expected.trim()) return true;
   const normActual = normalizeCapacity(actual);
   const normExpected = normalizeCapacity(expected);
   if (normActual === normExpected) return true;
 
-  const actualDigits = extractDigits(normActual);
-  const expectedDigits = extractDigits(normExpected);
-  if (actualDigits && expectedDigits && actualDigits === expectedDigits) {
-    return true;
+  // Extract number and unit to allow flexible unit comparison
+  const matchActual = normActual.match(/^(\d+(?:\.\d+)?)([A-Z]+)?$/);
+  const matchExpected = normExpected.match(/^(\d+(?:\.\d+)?)([A-Z]+)?$/);
+  if (matchActual && matchExpected) {
+    const numActual = matchActual[1];
+    const unitActual = matchActual[2] || "";
+    const numExpected = matchExpected[1];
+    const unitExpected = matchExpected[2] || "";
+
+    // If both specify units, units MUST match (e.g. KLB must match KLB, not LB)
+    if (unitActual && unitExpected && unitActual !== unitExpected) {
+      return false;
+    }
+    if (
+      numActual === numExpected ||
+      (!isNaN(Number(numActual)) && !isNaN(Number(numExpected)) && Number(numActual) === Number(numExpected))
+    ) {
+      return true;
+    }
   }
+
   return false;
 }
